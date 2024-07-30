@@ -28,6 +28,7 @@ class AwsTapeMaker {
 public:
     AwsTapeMaker(const std::string& volser, const std::string& outputFile)
         : m_volser(volser), m_outputFile(outputFile), m_prevBlockSize(0) {
+        initialize_tables();
         std::cout << "Initializing tape maker for volume " << volser << std::endl;
         m_outFile.open(outputFile, std::ios::binary);
         if (!m_outFile) {
@@ -293,39 +294,19 @@ private:
     }
 
     std::vector<uint8_t> asciiToEbcdic(const std::string& ascii) {
-        static const uint8_t table[256] = {
-            /* 00 */   0,  1,  2,  3, 55, 45, 46, 47, 22,  5, 37, 11, 12, 13, 14, 15,
-            /* 10 */  16, 17, 18, 19, 60, 61, 50, 38, 24, 25, 63, 39, 28, 29, 30, 31,
-            /* 20 */  64, 79,127,123, 91,108, 80,125, 77, 93, 92, 78,107, 96, 75, 97,
-            /* 30 */ 240,241,242,243,244,245,246,247,248,249,122, 94, 76,126,110,111,
-            /* 40 */ 124,193,194,195,196,197,198,199,200,201,209,210,211,212,213,214,
-            /* 50 */ 215,216,217,226,227,228,229,230,231,232,233, 74,224, 90, 95,109,
-            /* 60 */ 121,129,130,131,132,133,134,135,136,137,145,146,147,148,149,150,
-            /* 70 */ 151,152,153,162,163,164,165,166,167,168,169,192,106,208,161,  7,
-            /* 80 */  32, 33, 34, 35, 36, 21,  6, 23, 40, 41, 42, 43, 44,  9, 10, 27,
-            /* 90 */  48, 49, 26, 51, 52, 53, 54,  8, 56, 57, 58, 59,  4, 20, 62,255,
-            /* A0 */  65,170, 74,177,159,178,106,181,187,180,154,138,176,202,175,188,
-            /* B0 */ 144,143,234,250,190,160,182,179,157,218,155,139,183,184,185,171,
-            /* C0 */ 100,101, 98,102, 99,103,158,104,116,113,114,115,120,117,118,119,
-            /* D0 */ 172,105,237,238,235,239,236,191,128,253,254,251,252,173,174,89,
-            /* E0 */  68, 69, 66, 70, 67, 71,156, 72, 84, 81, 82, 83, 88, 85, 86, 87,
-            /* F0 */  140,141,142,143,144,145,146,147,148,149,186,204,205,206,207,203
-        };
-        std::vector<uint8_t> ebcdic(ascii.size());
-        for (size_t i = 0; i < ascii.size(); ++i) {
-            ebcdic[i] = table[static_cast<uint8_t>(ascii[i])];
+        std::vector<uint8_t> ebcdic;
+        ebcdic.reserve(ascii.size());
+        for (char c : ascii) {
+            ebcdic.push_back(ascii_to_ebcdic_table[static_cast<unsigned char>(c)]);
         }
         return ebcdic;
     }
 
     std::string ebcdicToAscii(const std::vector<uint8_t>& ebcdic) {
-        static const char ascii_table[256] = {
-            // ... (include the full EBCDIC to ASCII conversion table here)
-        };
         std::string ascii;
         ascii.reserve(ebcdic.size());
         for (uint8_t c : ebcdic) {
-            ascii.push_back(ascii_table[c]);
+            ascii.push_back(ebcdic_to_ascii_table[c]);
         }
         return ascii;
     }
@@ -339,7 +320,44 @@ private:
         if (str.length() >= length) return str.substr(0, length);
         return std::string(length - str.length(), '0') + str;
     }
+
+    static const unsigned char ebcdic_to_ascii_table[];
+    static unsigned char ascii_to_ebcdic_table[256];
+    static bool tables_initialized;
+
+    static void initialize_tables() {
+        if (!tables_initialized) {
+            for (int i = 0; i < 256; ++i) {
+                unsigned char ascii = ebcdic_to_ascii_table[i];
+                ascii_to_ebcdic_table[ascii] = i;
+            }
+
+            tables_initialized = true;
+        }
+    }
 };
+
+const unsigned char AwsTapeMaker::ebcdic_to_ascii_table[] = {
+    "\x00\x01\x02\x03\xA6\x09\xA7\x7F\xA9\xB0\xB1\x0B\x0C\x0D\x0E\x0F"
+    "\x10\x11\x12\x13\xB2\xB4\x08\xB7\x18\x19\x1A\xB8\xBA\x1D\xBB\x1F"
+    "\xBD\xC0\x1C\xC1\xC2\x0A\x17\x1B\xC3\xC4\xC5\xC6\xC7\x05\x06\x07"
+    "\xC8\xC9\x16\xCB\xCC\x1E\xCD\x04\xCE\xD0\xD1\xD2\x14\x15\xD3\xFC"
+    "\x20\xD4\x83\x84\x85\xA0\xD5\x86\x87\xA4\xD6\x2E\x3C\x28\x2B\xD7"
+    "\x26\x82\x88\x89\x8A\xA1\x8C\x8B\x8D\xD8\x21\x24\x2A\x29\x3B\x5E"
+    "\x2D\x2F\xD9\x8E\xDB\xDC\xDD\x8F\x80\xA5\x7C\x2C\x25\x5F\x3E\x3F"
+    "\xDE\x90\xDF\xE0\xE2\xE3\xE4\xE5\xE6\x60\x3A\x23\x40\x27\x3D\x22"
+    "\xE7\x61\x62\x63\x64\x65\x66\x67\x68\x69\xAE\xAF\xE8\xE9\xEA\xEC"
+    "\xF0\x6A\x6B\x6C\x6D\x6E\x6F\x70\x71\x72\xF1\xF2\x91\xF3\x92\xF4"
+    "\xF5\x7E\x73\x74\x75\x76\x77\x78\x79\x7A\xAD\xA8\xF6\x5B\xF7\xF8"
+    "\x9B\x9C\x9D\x9E\x9F\xB5\xB6\xAC\xAB\xB9\xAA\xB3\xBC\x5D\xBE\xBF"
+    "\x7B\x41\x42\x43\x44\x45\x46\x47\x48\x49\xCA\x93\x94\x95\xA2\xCF"
+    "\x7D\x4A\x4B\x4C\x4D\x4E\x4F\x50\x51\x52\xDA\x96\x81\x97\xA3\x98"
+    "\x5C\xE1\x53\x54\x55\x56\x57\x58\x59\x5A\xFD\xEB\x99\xED\xEE\xEF"
+    "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\xFE\xFB\x9A\xF9\xFA\xFF"
+};
+
+unsigned char AwsTapeMaker::ascii_to_ebcdic_table[256];
+bool AwsTapeMaker::tables_initialized = false;
 
 void readConfigFile(const std::string& filename, std::vector<FileConfig>& configs) {
     std::ifstream file(filename);
