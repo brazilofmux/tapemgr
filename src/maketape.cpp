@@ -28,7 +28,6 @@ struct AwsTapeBlockHeader {
     uint8_t flags2;
 };
 
-
 int calculateOptimalBlksize(int lrecl)
 {
     int halfTrack = 23476; // 3380 half-track.
@@ -81,9 +80,10 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
         jcl << "//SYSPRINT DD  SYSOUT=A\n";
         jcl << "//SYSIN    DD  DUMMY\n";
         jcl << "//SYSUT1   DD  DSN=" << config.datasetName << ",UNIT=TAPE,\n";
-        jcl << "//             VOL=SER=240001,LABEL=(" << ((stepNumber-1)/2) << ",SL),DISP=OLD,\n";
+        jcl << "//             VOL=(PRIVATE,RETAIN,SER=240001),LABEL=(" << ((stepNumber-1)/2) << ",SL),\n";
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
-            << ",BLKSIZE=" << config.blksize << ")\n";
+            << ",BLKSIZE=" << config.blksize << "),\n";
+        jcl << "//             DISP=OLD\n";
         jcl << "//SYSUT2   DD  DSN=" << config.datasetName << ",UNIT=3380,\n";
         jcl << "//             VOL=SER=SVD002,DISP=(NEW,CATLG),\n";
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
