@@ -74,15 +74,69 @@ private:
     std::vector<FileConfig> m_files;
     std::ofstream m_outFile;
     uint16_t m_prevBlockSize;
+    int m_blockCount;
+
+    std::string createVOL1Label() {
+        std::string label = "VOL1" + padRight(m_volser, 6) + "0" + std::string(69, ' ');
+        return label.substr(0, 80);
+    }
+
+    std::string createHDR1Label(const FileConfig& config, int fileNumber) {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%y%j");
+        std::string date = ss.str();
+
+        std::string label = "HDR1" + padRight(config.inputFile, 17) +
+                            padRight(m_volser, 6) +
+                            "0001" + padLeft(std::to_string(fileNumber), 4) +
+                            "0001" + date + "  " + "99365" + "0000000" + std::string(28, ' ');
+        return label.substr(0, 80);
+    }
+
+    std::string createHDR2Label(const FileConfig& config) {
+        std::string label = "HDR2" + std::string(1, config.recfm) +
+                            padLeft(std::to_string(config.blksize), 5) +
+                            padLeft(std::to_string(config.lrecl), 5) +
+                            "0HERCULES/MAKETAPE    B" + std::string(36, ' ');
+        return label.substr(0, 80);
+    }
+
+
+    std::string createEOF1Label(const FileConfig& config, int fileNumber) {
+        auto now = std::chrono::system_clock::now();
+        auto in_time_t = std::chrono::system_clock::to_time_t(now);
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&in_time_t), "%y%j");
+        std::string date = ss.str();
+
+        std::string label = "EOF1" + padRight(config.inputFile, 17) +
+                            padRight(m_volser, 6) +
+                            "0001" + padLeft(std::to_string(fileNumber), 4) +
+                            "0001" + date + "  " + "99365" +
+                            padLeft(std::to_string(m_blockCount), 6) +
+                            std::string(28, ' ');
+        return label.substr(0, 80);
+    }
+
+    std::string createEOF2Label(const FileConfig& config) {
+        std::string label = "EOF2" + std::string(1, config.recfm) +
+                            padLeft(std::to_string(config.blksize), 5) +
+                            padLeft(std::to_string(config.lrecl), 5) +
+                            "0HERCULES/MAKETAPE    B" + std::string(36, ' ');
+        return label.substr(0, 80);
+    }
 
     void writeVolumeLabel() {
         std::cout << "Writing VOL1 label" << std::endl;
-        std::string label = "VOL1" + m_volser + std::string(69, ' ');
-        writeBlock(asciiToEbcdic(label), 0xA0, true);
+        std::string label = createVOL1Label();
+        writeBlock(asciiToEbcdic(label), 0xA0);
     }
 
     void writeFile(const FileConfig& config, int fileNumber) {
         std::cout << "Writing file " << fileNumber << ": " << config.inputFile << std::endl;
+        m_blockCount = 0;
         writeHeaderLabels(config, fileNumber);
         writeDataBlocks(config);
         writeEOFLabels(config, fileNumber);
@@ -90,26 +144,11 @@ private:
 
     void writeHeaderLabels(const FileConfig& config, int fileNumber) {
         std::cout << "  Writing HDR1 and HDR2 labels" << std::endl;
-        auto now = std::chrono::system_clock::now();
-        auto in_time_t = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&in_time_t), "%y%j");
-        std::string date = ss.str();
+        std::string hdr1 = createHDR1Label(config, fileNumber);
+        std::string hdr2 = createHDR2Label(config);
 
-        std::string hdr1 = "HDR1" + padRight(config.inputFile, 17) +
-                           padRight(m_volser, 6) +
-                           "0001" + padLeft(std::to_string(fileNumber), 4) +
-                           "0001" + date + "  " + "00000" + std::string(28, ' ');
-        std::cout << "  Writing HDR1 label (ASCII): " << hdr1 << std::endl;
-        writeBlock(asciiToEbcdic(hdr1), 0xA0, true);
-
-        std::string hdr2 = "HDR2" + config.recfm +
-                           padLeft(std::to_string(config.blksize), 5) +
-                           padLeft(std::to_string(config.lrecl), 5) +
-                           "0" + std::string(66, ' ');
-        std::cout << "  Writing HDR2 label (ASCII): " << hdr2 << std::endl;
-        writeBlock(asciiToEbcdic(hdr2), 0xA0, true);
-
+        writeBlock(asciiToEbcdic(hdr1), 0xA0);
+        writeBlock(asciiToEbcdic(hdr2), 0xA0);
         writeTapeMark();
     }
 
@@ -126,14 +165,16 @@ private:
             inFile.read(buffer.data(), config.blksize);
             std::streamsize bytesRead = inFile.gcount();
             if (bytesRead > 0) {
-                std::vector<uint8_t> block(buffer.begin(), buffer.begin() + bytesRead);
+                std::vector<uint8_t> block(config.blksize, 0x40);  // Initialize with EBCDIC space
+                std::copy(buffer.begin(), buffer.begin() + bytesRead, block.begin());
                 if (!config.binary) {
                     for (auto& byte : block) {
                         byte = asciiToEbcdic(std::string(1, byte))[0];
                     }
                 }
                 writeBlock(block, 0xA0);
-                totalBytesWritten += bytesRead;
+                m_blockCount++;
+                totalBytesWritten += config.blksize;
             }
         }
         std::cout << "    Wrote " << totalBytesWritten << " bytes" << std::endl;
@@ -142,18 +183,11 @@ private:
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
         std::cout << "  Writing EOF1 and EOF2 labels" << std::endl;
         writeTapeMark();
-        std::string eof1 = "EOF1" + padRight(config.inputFile, 17) +
-                           padRight(m_volser, 6) +
-                           "0001" + padLeft(std::to_string(fileNumber), 4) +
-                           "0001" + std::string(39, ' ');
+        std::string eof1 = createEOF1Label(config, fileNumber);
+        std::string eof2 = createEOF2Label(config);
 
-        std::string eof2 = "EOF2" + config.recfm +
-                           padLeft(std::to_string(config.blksize), 5) +
-                           padLeft(std::to_string(config.lrecl), 5) +
-                           "0" + std::string(66, ' ');
-
-        writeBlock(asciiToEbcdic(eof1), 0xA0, true);
-        writeBlock(asciiToEbcdic(eof2), 0xA0, true);
+        writeBlock(asciiToEbcdic(eof1), 0xA0);
+        writeBlock(asciiToEbcdic(eof2), 0xA0);
     }
 
     void writeEndOfTape() {
@@ -162,25 +196,16 @@ private:
         writeTapeMark();
     }
 
-    void writeBlock(const std::vector<uint8_t>& data, uint8_t flags, bool isLabel = false) {
-        std::vector<uint8_t> paddedData = data;
-        if (isLabel && paddedData.size() < 80) {
-            paddedData.resize(80, 0x40);  // Pad with EBCDIC space (0x40)
-        }
-
+    void writeBlock(const std::vector<uint8_t>& data, uint8_t flags) {
         AwsTapeBlockHeader header = {
-            static_cast<uint16_t>(paddedData.size()),
+            static_cast<uint16_t>(data.size()),
             m_prevBlockSize,
             flags,
             0
         };
         m_outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        m_outFile.write(reinterpret_cast<const char*>(paddedData.data()), paddedData.size());
+        m_outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
         m_prevBlockSize = header.curblkl;
-
-        std::cout << "Wrote block: size=" << header.curblkl
-                  << ", prev=" << header.prvblkl
-                  << ", flags=0x" << std::hex << static_cast<int>(flags) << std::dec << std::endl;
     }
 
     void verifyTape() {
