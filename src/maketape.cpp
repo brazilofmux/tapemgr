@@ -18,6 +18,7 @@ struct FileConfig {
     char recordFormat;      // F, V, or U
     char blockAttribute;    // B, S, R, or ' '
     bool binary;
+    size_t recordCount;
 };
 
 struct AwsTapeBlockHeader {
@@ -26,6 +27,72 @@ struct AwsTapeBlockHeader {
     uint8_t flags1;
     uint8_t flags2;
 };
+
+
+int calculateOptimalBlksize(int lrecl)
+{
+    int halfTrack = 23476; // 3380 half-track.
+    int recordsPerHalfTrack = halfTrack/lrecl;
+    return lrecl*recordsPerHalfTrack;
+}
+
+std::string calculateSpace(const FileConfig& config) {
+    const int BYTES_PER_TRACK = 47476;  // For 3380
+    const int TRACKS_PER_CYLINDER = 15;
+
+    std::cout << "Record Count=" << config.recordCount << std::endl;
+
+    // Calculate total bytes
+    size_t totalBytes = config.recordCount * config.lrecl;
+
+    // Calculate tracks needed
+    int tracksNeeded = (totalBytes + BYTES_PER_TRACK - 1) / BYTES_PER_TRACK;
+
+    // Add 15% for safety margin
+    tracksNeeded = static_cast<int>(tracksNeeded * 1.15);
+
+    // Convert to cylinders if it's more than one cylinder
+    if (tracksNeeded > TRACKS_PER_CYLINDER) {
+        int cylinders = (tracksNeeded + TRACKS_PER_CYLINDER - 1) / TRACKS_PER_CYLINDER;
+        int extraTracks = tracksNeeded % TRACKS_PER_CYLINDER;
+        return "CYL,(" + std::to_string(cylinders) + "," + std::to_string(cylinders/2) + ")";
+    } else {
+        return "TRK,(" + std::to_string(tracksNeeded) + "," + std::to_string(tracksNeeded/2) + ")";
+    }
+}
+
+std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) {
+    std::stringstream jcl;
+
+    // Job card
+    jcl << "//REST    JOB (001),'STEPHEN DENNIS',CLASS=A,MSGLEVEL=(1,1),MSGCLASS=A\n";
+    jcl << "//JOBLIB  DD  DSN=SYS1.LINKLIB,DISP=SHR\n";
+
+    int stepNumber = 1;
+    for (const auto& config : configs) {
+        // Delete step
+        jcl << "//STEP" << std::setfill('0') << std::setw(2) << stepNumber++ << "   EXEC PGM=IEFBR14\n";
+        jcl << "//SYSPRINT DD  SYSOUT=*\n";
+        jcl << "//DSN2DEL  DD  DSN=" << config.datasetName << ",DISP=(MOD,DELETE,DELETE),\n";
+        jcl << "//             UNIT=3380,VOL=SER=SVD002\n";
+
+        // Restore step
+        jcl << "//STEP" << std::setfill('0') << std::setw(2) << stepNumber++ << "   EXEC PGM=IEBGENER\n";
+        jcl << "//SYSPRINT DD  SYSOUT=A\n";
+        jcl << "//SYSIN    DD  DUMMY\n";
+        jcl << "//SYSUT1   DD  DSN=" << config.datasetName << ",UNIT=TAPE,\n";
+        jcl << "//             VOL=SER=240001,LABEL=(" << ((stepNumber-1)/2) << ",SL),DISP=OLD,\n";
+        jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
+            << ",BLKSIZE=" << config.blksize << ")\n";
+        jcl << "//SYSUT2   DD  DSN=" << config.datasetName << ",UNIT=3380,\n";
+        jcl << "//             VOL=SER=SVD002,DISP=(NEW,CATLG),\n";
+        jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
+            << ",DSORG=PS,BLKSIZE=" << calculateOptimalBlksize(config.lrecl) << "),\n";
+        jcl << "//             SPACE=(" << calculateSpace(config) << ")\n";
+    }
+
+    return jcl.str();
+}
 
 class AwsTapeMaker {
 public:
@@ -80,6 +147,14 @@ public:
                 writeFile(m_files[i], i + 1);
             }
             writeEndOfTape();
+
+            std::string jcl = generateMultiFileRestoreJCL(m_files);
+
+            // Write the JCL to a file
+            std::ofstream outFile("RESTORE.JCL");
+            outFile << jcl;
+            outFile.close();
+
         } catch (const std::exception& e) {
             std::cerr << "Error during tape writing: " << e.what() << std::endl;
             throw;
@@ -117,7 +192,7 @@ private:
         std::string label = "HDR1";
         label += padRight(config.datasetName, 17);  // Data Set Identifier
         label += padRight(m_volser, 6);             // Data Set Serial Number
-        label += padLeft(std::to_string(fileNumber), 4);  // Volume Sequence Number
+        label += padLeft("0001", 4);                // Volume Sequence Number
         label += padLeft(std::to_string(fileNumber), 4);  // Data Set Sequence Number
         label += "0001";                            // Generation Number
         label += "00";                              // Version Number
@@ -184,7 +259,7 @@ private:
         writeBlock(asciiToEbcdic(label), 0xA0, true);
     }
 
-    void writeFile(const FileConfig& config, int fileNumber) {
+    void writeFile(FileConfig& config, int fileNumber) {
         std::cout << "Writing file " << fileNumber << ": "
                   << config.inputFile << " (Dataset: " << config.datasetName << ")" << std::endl;
         m_blockCount = 0;
@@ -203,7 +278,7 @@ private:
         writeTapeMark();
     }
 
-    void writeDataBlocks(const FileConfig& config) {
+    void writeDataBlocks(FileConfig& config) {
         std::cout << "  Writing data blocks" << std::endl;
         std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
         std::vector<uint8_t> block(config.blksize, 0x40);  // Initialize with EBCDIC space
@@ -218,6 +293,7 @@ private:
             }
         };
 
+        size_t recordCount = 0;
         if (config.binary) {
             while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
                 std::copy(record.begin(), record.end(), block.begin() + blockOffset);
@@ -225,6 +301,7 @@ private:
                 if (blockOffset == config.blksize) {
                     writeCurrentBlock();
                 }
+                recordCount++;
             }
         } else {
             std::string line;
@@ -248,11 +325,13 @@ private:
                 if (blockOffset == config.blksize) {
                     writeCurrentBlock();
                 }
+                recordCount++;
             }
         }
 
         // Write any remaining partial block
         writeCurrentBlock();
+        config.recordCount = recordCount;
     }
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
@@ -432,6 +511,7 @@ int main(int argc, char* argv[]) {
         tapeMaker.writeTape();
 
         std::cout << "AWS tape file created successfully: " << outputFile << std::endl;
+
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

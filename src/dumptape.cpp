@@ -399,35 +399,6 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
 
             std::string labelIdentifier = ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(buffer.data()), 4);
 
-            if (labelIdentifier == "VOL1") {
-                const VOL1Label* vol1 = reinterpret_cast<const VOL1Label*>(buffer.data());
-                processVOL1Label(*vol1, verbosity);
-            } else if (labelIdentifier == "HDR1") {
-                const HDR1Label* hdr1 = reinterpret_cast<const HDR1Label*>(buffer.data());
-                processHDR1Label(*hdr1, verbosity);
-                fileCount++;
-            } else if (labelIdentifier == "HDR2") {
-                const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
-                processHDR2Label(*hdr2, verbosity);
-            } else if (labelIdentifier == "EOF1") {
-                const EOF1Label* eof1 = reinterpret_cast<const EOF1Label*>(buffer.data());
-                processEOF1Label(*eof1, verbosity);
-            } else if (labelIdentifier == "EOF2") {
-                const EOF2Label* eof2 = reinterpret_cast<const EOF2Label*>(buffer.data());
-                processEOF2Label(*eof2, verbosity);
-            } else {
-                // Data block
-                if (verbosity >= VerbosityLevel::Detailed) {
-                    std::cout << "Data block: " << dataSize << " bytes" << std::endl;
-                    if (verbosity >= VerbosityLevel::Debug) {
-                        std::cout << "First 32 bytes: ";
-                        for (size_t i = 0; i < std::min<size_t>(32, dataSize); ++i) {
-                            std::cout << std::setw(2) << std::setfill('0') << std::hex << static_cast<int>(buffer[i]) << " ";
-                        }
-                        std::cout << std::dec << std::endl;
-                    }
-                }
-            }
 
             if (labelIdentifier == "VOL1") {
                 const VOL1Label* vol1 = reinterpret_cast<const VOL1Label*>(buffer.data());
@@ -450,6 +421,24 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                     processHDR2Label(*hdr2, verbosity);
                 } else {
                     std::cout << "HDR2 label validation failed" << std::endl;
+                }
+            } else if (labelIdentifier == "EOF1") {
+                const EOF1Label* eof1 = reinterpret_cast<const EOF1Label*>(buffer.data());
+                processEOF1Label(*eof1, verbosity);
+            } else if (labelIdentifier == "EOF2") {
+                const EOF2Label* eof2 = reinterpret_cast<const EOF2Label*>(buffer.data());
+                processEOF2Label(*eof2, verbosity);
+            } else {
+                // Data block
+                if (verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "Data block: " << dataSize << " bytes" << std::endl;
+                    if (verbosity >= VerbosityLevel::Debug) {
+                        std::cout << "First 32 bytes: ";
+                        for (size_t i = 0; i < std::min<size_t>(32, dataSize); ++i) {
+                            std::cout << std::setw(2) << std::setfill('0') << std::hex << static_cast<int>(buffer[i]) << " ";
+                        }
+                        std::cout << std::dec << std::endl;
+                    }
                 }
             }
 
