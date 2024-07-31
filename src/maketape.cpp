@@ -27,8 +27,12 @@ struct AwsTapeBlockHeader {
 
 class AwsTapeMaker {
 public:
-    AwsTapeMaker(const std::string& volser, const std::string& outputFile)
-        : m_volser(volser), m_outputFile(outputFile), m_prevBlockSize(0) {
+    AwsTapeMaker(const std::string& volser, const std::string& outputFile,
+                 const std::string ownerCode = "TAPEOWNER",
+                 const std::string jobId = "MAJESTY/MAKETAPE")
+        : m_volser(volser), m_outputFile(outputFile),
+          m_prevBlockSize(0), m_blockCount(0),
+          m_ownerCode(ownerCode), m_jobId(jobId) {
         initialize_tables();
         std::cout << "Initializing tape maker for volume " << volser << std::endl;
         m_outFile.open(outputFile, std::ios::binary);
@@ -83,57 +87,87 @@ private:
     std::ofstream m_outFile;
     uint16_t m_prevBlockSize;
     int m_blockCount;
+    std::string m_ownerCode;
+    std::string m_jobId;
 
     std::string createVOL1Label() {
-        std::string label = "VOL1" + padRight(m_volser, 6) + "0" + std::string(69, ' ');
+        std::string label = "VOL1";
+        label += padRight(m_volser, 6);       // Volume Serial Number
+        label += " ";                         // Reserved
+        label += std::string(5, ' ');         // VTOC Pointer (blank for tape)
+        label += std::string(25, ' ');        // Reserved
+        label += padRight(m_ownerCode, 10);   // Owner Name and Address Code
+        label += std::string(29, ' ');        // Reserved
         return label.substr(0, 80);
     }
 
     std::string createHDR1Label(const FileConfig& config, int fileNumber) {
         auto now = std::chrono::system_clock::now();
         auto in_time_t = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&in_time_t), "%y%j");
-        std::string date = ss.str();
+        std::tm* tm = std::localtime(&in_time_t);
 
-        std::string label = "HDR1" + padRight(config.datasetName, 17) +
-                            padRight(m_volser, 6) +
-                            "0001" + padLeft(std::to_string(fileNumber), 4) +
-                            "0001" + date + "  " + "99365" + "0000000" + std::string(28, ' ');
+        std::string label = "HDR1";
+        label += padRight(config.datasetName, 17);  // Data Set Identifier
+        label += padRight(m_volser, 6);             // Data Set Serial Number
+        label += padLeft(std::to_string(fileNumber), 4);  // Volume Sequence Number
+        label += padLeft(std::to_string(fileNumber), 4);  // Data Set Sequence Number
+        label += "0001";                            // Generation Number
+        label += "00";                              // Version Number
+        label += formatDate(tm);                    // Creation Date
+        label += formatExpirationDate(30);          // Default expriation to 30 days from now
+        label += "99365";                           // Expiration Date
+        label += "0";                               // Data Set Security
+        label += "000000";                          // Block Count
+        label += "IBM OS/VS 370";                   // System Code
+        label += std::string(3, ' ');               // Reserved
         return label.substr(0, 80);
     }
 
+    std::string formatDate(const std::tm* tm) {
+        std::stringstream ss;
+        ss << std::put_time(tm, "%y%j");
+        return (tm->tm_year >= 100 ? "0" : " ") + ss.str();  // Century + yyddd
+    }
+
+    std::string formatExpirationDate(int daysToKeep) {
+        auto now = std::chrono::system_clock::now();
+        auto expiration = now + std::chrono::hours(24 * daysToKeep);
+        auto in_time_t = std::chrono::system_clock::to_time_t(expiration);
+        std::tm* tm = std::localtime(&in_time_t);
+        return formatDate(tm);
+    }
+
     std::string createHDR2Label(const FileConfig& config) {
-        std::string label = "HDR2" +
-                            std::string(1, config.recfm) +
-                            padLeft(std::to_string(config.blksize), 5) +
-                            padLeft(std::to_string(config.lrecl), 5) +
-                            "0" +  // Tape density (0 for 3480 and later)
-                            "0" +  // Dataset position
-                            padRight("HERCULES/MAKETAPE", 17) +
-                            (config.blksize > config.lrecl ? "B" : " ") +  // Record attribute
-                            std::string(45, ' ');  // Reserved space
+        std::string label = "HDR2";
+        label += config.recfm;                      // Record Format
+        label += padLeft(std::to_string(config.blksize), 5);  // Block Length
+        label += padLeft(std::to_string(config.lrecl), 5);    // Record Length
+        label += "0";                               // Tape Density
+        label += "0";                               // Data Set Position
+        label += padRight(m_jobId, 17);             // Job/Job Step Identification
+        label += "  ";                              // Tape Recording Technique
+        label += " ";                               // Control Character
+        label += " ";                               // Reserved
+        label += (config.blksize > config.lrecl ? "B" : " ");  // Block Attribute
+        label += std::string(2, ' ');               // Reserved
+        label += std::string(6, ' ');               // Device Serial Number
+        label += " ";                               // Checkpoint Data Set Identifier
+        label += std::string(22, ' ');              // Reserved
+        label += padLeft(std::to_string(config.blksize), 10);  // Large Block Length
         return label.substr(0, 80);
     }
 
     std::string createEOF1Label(const FileConfig& config, int fileNumber) {
-        auto now = std::chrono::system_clock::now();
-        auto in_time_t = std::chrono::system_clock::to_time_t(now);
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&in_time_t), "%y%j");
-        std::string date = ss.str();
-
-        std::string label = "EOF1" + padRight(config.datasetName, 17) +
-                            padRight(m_volser, 6) +
-                            "0001" + padLeft(std::to_string(fileNumber), 4) +
-                            "0001" + date + "  " + "99365" +
-                            padLeft(std::to_string(m_blockCount), 6) +
-                            std::string(28, ' ');
-        return label.substr(0, 80);
+        std::string label = createHDR1Label(config, fileNumber);
+        label.replace(0, 3, "EOF");
+        label.replace(54, 6, padLeft(std::to_string(m_blockCount), 6));
+        return label;
     }
 
     std::string createEOF2Label(const FileConfig& config) {
-        return createHDR2Label(config);
+        std::string label = createHDR2Label(config);
+        label.replace(0, 3, "EOF");
+        return label;
     }
 
     void writeVolumeLabel() {
