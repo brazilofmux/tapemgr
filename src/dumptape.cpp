@@ -1,0 +1,316 @@
+#include <algorithm>
+#include <climits>
+#include <cstring>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <vector>
+#include <stdexcept>
+#include <getopt.h>
+
+enum class VerbosityLevel {
+    Summary,
+    Normal,
+    Detailed,
+    Debug
+};
+
+struct ProgramOptions {
+    VerbosityLevel verbosity = VerbosityLevel::Normal;
+    std::vector<std::string> inputFiles;
+};
+
+// Define constants
+constexpr int MAX_BLOCK_SIZE = 65535;
+constexpr int STANDARD_LABEL_LENGTH = 80;
+
+// Define structs
+struct AwsTapeBlockHeader {
+    uint16_t curblkl;
+    uint16_t prvblkl;
+    uint8_t flags1;
+    uint8_t flags2;
+};
+
+// Define enums
+enum class PrintOption {
+    Summary,
+    Detail
+};
+
+// Function prototypes
+void processTape(const std::string& inputFile, VerbosityLevel verbosity);
+size_t readBlockHeader(std::ifstream& file, AwsTapeBlockHeader& header);
+size_t readDataBlock(std::ifstream& file, std::vector<uint8_t>& buffer, int length);
+void printSummary(const std::string& labelFileName, const std::string& labelFileNumber,
+                  char labelRECFM, unsigned int labelBLKSIZE, unsigned int labelLRECL,
+                  unsigned int labelBLKCOUNT, unsigned int auditBLKCOUNT);
+void printDetail(const AwsTapeBlockHeader& header, const std::vector<uint8_t>& buffer, VerbosityLevel verbosity);
+std::string ebcdicToAscii(const std::vector<uint8_t>& ebcdicData);
+
+// EBCDIC to ASCII conversion table
+const unsigned char ebcdicToAsciiTable[] = {
+    "\x00\x01\x02\x03\xA6\x09\xA7\x7F\xA9\xB0\xB1\x0B\x0C\x0D\x0E\x0F"
+    "\x10\x11\x12\x13\xB2\xB4\x08\xB7\x18\x19\x1A\xB8\xBA\x1D\xBB\x1F"
+    "\xBD\xC0\x1C\xC1\xC2\x0A\x17\x1B\xC3\xC4\xC5\xC6\xC7\x05\x06\x07"
+    "\xC8\xC9\x16\xCB\xCC\x1E\xCD\x04\xCE\xD0\xD1\xD2\x14\x15\xD3\xFC"
+    "\x20\xD4\x83\x84\x85\xA0\xD5\x86\x87\xA4\xD6\x2E\x3C\x28\x2B\xD7"
+    "\x26\x82\x88\x89\x8A\xA1\x8C\x8B\x8D\xD8\x21\x24\x2A\x29\x3B\x5E"
+    "\x2D\x2F\xD9\x8E\xDB\xDC\xDD\x8F\x80\xA5\x7C\x2C\x25\x5F\x3E\x3F"
+    "\xDE\x90\xDF\xE0\xE2\xE3\xE4\xE5\xE6\x60\x3A\x23\x40\x27\x3D\x22"
+    "\xE7\x61\x62\x63\x64\x65\x66\x67\x68\x69\xAE\xAF\xE8\xE9\xEA\xEC"
+    "\xF0\x6A\x6B\x6C\x6D\x6E\x6F\x70\x71\x72\xF1\xF2\x91\xF3\x92\xF4"
+    "\xF5\x7E\x73\x74\x75\x76\x77\x78\x79\x7A\xAD\xA8\xF6\x5B\xF7\xF8"
+    "\x9B\x9C\x9D\x9E\x9F\xB5\xB6\xAC\xAB\xB9\xAA\xB3\xBC\x5D\xBE\xBF"
+    "\x7B\x41\x42\x43\x44\x45\x46\x47\x48\x49\xCA\x93\x94\x95\xA2\xCF"
+    "\x7D\x4A\x4B\x4C\x4D\x4E\x4F\x50\x51\x52\xDA\x96\x81\x97\xA3\x98"
+    "\x5C\xE1\x53\x54\x55\x56\x57\x58\x59\x5A\xFD\xEB\x99\xED\xEE\xEF"
+    "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\xFE\xFB\x9A\xF9\xFA\xFF"
+};
+
+int safeStoi(const std::string& str, const std::string& fieldName) {
+    try {
+        return std::stoi(str);
+    } catch (const std::invalid_argument& e) {
+        std::cout << "Error: Invalid " << fieldName << ": '" << str
+                  << "' is not a valid integer." << std::endl;
+        return 0; // or some other appropriate default value
+    } catch (const std::out_of_range& e) {
+        std::cout << "Error: " << fieldName << " out of range: '" << str << "'" << std::endl;
+        return 0; // or some other appropriate default value
+    }
+}
+
+void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
+    std::ifstream file(inputFile, std::ios::binary);
+    if (!file) {
+        std::cerr << "Error opening file: " << inputFile << std::endl;
+        return;
+    }
+
+    if (verbosity >= VerbosityLevel::Normal) {
+        std::cout << "Processing AWSTAPE file: " << inputFile << std::endl;
+    }
+
+    std::streampos filePosition = 0;  // Track file position
+
+    AwsTapeBlockHeader header;
+    std::vector<uint8_t> buffer(MAX_BLOCK_SIZE);
+    uint8_t prevFlags = 0;
+    unsigned int auditBLKCOUNT = 0;
+    std::string labelFileName, labelFileNumber;
+    char labelRECFM = ' ';
+    unsigned int labelBLKSIZE = 0, labelLRECL = 0, labelBLKCOUNT = 0;
+    int fileNo = 0;
+    uint64_t fileBytes = 0;
+    uint16_t minBlockSize = std::numeric_limits<uint16_t>::max();
+    uint16_t maxBlockSize = 0;
+
+    auto printHexDump = [](const std::vector<uint8_t>& data, size_t start, size_t length) {
+        std::cout << "  Hex: ";
+        for (size_t i = start; i < start + length && i < data.size(); ++i) {
+            std::cout << std::setfill('0') << std::setw(2) << std::uppercase << std::hex << static_cast<int>(data[i]) << " ";
+        }
+        std::cout << std::dec << std::endl;
+    };
+
+    while (true) {
+        std::streampos blockStart = file.tellg();  // Get position at start of block
+
+        size_t headerSize = readBlockHeader(file, header);
+        if (file.eof()) break;
+
+        if (verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Block starts at file position: 0x" << std::uppercase << std::hex << blockStart << std::dec << std::endl;
+            std::cout << "Header size: " << headerSize << " bytes" << std::endl;
+        }
+
+        printDetail(header, buffer, verbosity);
+
+        if (header.curblkl > 0) {
+            size_t dataSize = readDataBlock(file, buffer, header.curblkl);
+
+            if (verbosity >= VerbosityLevel::Debug) {
+                std::cout << "Data size: " << dataSize << " bytes" << std::endl;
+                std::cout << "Block ends at file position: 0x" << std::uppercase << std::hex << file.tellg() << std::dec << std::endl;
+            }
+
+            std::string asciiData = ebcdicToAscii(std::vector<uint8_t>(buffer.begin(), buffer.begin() + header.curblkl));
+
+            if (verbosity >= VerbosityLevel::Debug) {
+                if (asciiData.substr(0, 4) == "VOL1" ||
+                    asciiData.substr(0, 4) == "HDR1" ||
+                    asciiData.substr(0, 4) == "HDR2" ||
+                    asciiData.substr(0, 4) == "EOF1" ||
+                    asciiData.substr(0, 4) == "EOF2") {
+                    std::cout << "Tape Label: " << asciiData.substr(0, 80) << std::endl;
+                    printHexDump(buffer, 0, 80);
+                }
+            }
+
+            if (asciiData.substr(0, 4) == "HDR1") {
+                fileNo++;
+                labelFileName = asciiData.substr(4, 17);
+                labelFileNumber = asciiData.substr(31, 4);
+                auditBLKCOUNT = 0;
+                fileBytes = 0;
+                minBlockSize = std::numeric_limits<uint16_t>::max();
+                maxBlockSize = 0;
+            }  else if (asciiData.substr(0, 4) == "HDR2") {
+                labelRECFM = asciiData[4];
+                labelBLKSIZE = safeStoi(asciiData.substr(5, 5), "BLKSIZE");
+                labelLRECL = safeStoi(asciiData.substr(10, 5), "LRECL");
+            }
+            else if (asciiData.substr(0, 4) == "EOF1") {
+                labelBLKCOUNT = safeStoi(asciiData.substr(54, 6), "BLKCOUNT");
+            } else if (asciiData.substr(0, 4) == "EOF2") {
+                // Print file summary
+                std::cout << "File No. " << fileNo << ": Blocks=" << auditBLKCOUNT
+                          << ", Bytes=" << fileBytes
+                          << ", Block size min=" << minBlockSize
+                          << ", max=" << maxBlockSize
+                          << ", avg=" << (auditBLKCOUNT > 0 ? fileBytes / auditBLKCOUNT : 0)
+                          << std::endl;
+            }
+            else {
+                // Data block
+                ++auditBLKCOUNT;
+                fileBytes += header.curblkl;
+                minBlockSize = std::min(minBlockSize, header.curblkl);
+                maxBlockSize = std::max(maxBlockSize, header.curblkl);
+
+                if (verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "Data block (" << header.curblkl << " bytes):" << std::endl;
+                    if (verbosity >= VerbosityLevel::Debug) {
+                        std::cout << "  First 40 bytes (ASCII): " << asciiData.substr(0, std::min<size_t>(40, header.curblkl)) << std::endl;
+                        printHexDump(buffer, 0, std::min<size_t>(40, header.curblkl));
+                        if (header.curblkl > 80) {
+                            std::cout << "  Last 40 bytes (ASCII):  " << asciiData.substr(header.curblkl - std::min<size_t>(40, header.curblkl)) << std::endl;
+                            printHexDump(buffer, header.curblkl - std::min<size_t>(40, header.curblkl), std::min<size_t>(40, header.curblkl));
+                        }
+                    }
+                }
+            }
+        }
+
+        if (verbosity >= VerbosityLevel::Detailed) {
+            if (header.flags1 & 0x40) {  // Tape mark
+                std::cout << "TAPE MARK" << std::endl;
+                if (prevFlags == header.flags1) {
+                    std::cout << "End of tape" << std::endl;
+                    break;  // Two consecutive tape marks
+                }
+            }
+        }
+
+        prevFlags = header.flags1;
+    }
+}
+
+size_t readBlockHeader(std::ifstream& file, AwsTapeBlockHeader& header) {
+    file.read(reinterpret_cast<char*>(&header), sizeof(AwsTapeBlockHeader));
+    return file.gcount();
+}
+
+size_t readDataBlock(std::ifstream& file, std::vector<uint8_t>& buffer, int length) {
+    file.read(reinterpret_cast<char*>(buffer.data()), length);
+    return file.gcount();
+}
+
+void printSummary(const std::string& labelFileName, const std::string& labelFileNumber,
+                  char labelRECFM, unsigned int labelBLKSIZE, unsigned int labelLRECL,
+                  unsigned int labelBLKCOUNT, unsigned int auditBLKCOUNT) {
+    std::cout << std::setw(4) << labelFileNumber << "  "
+              << std::setw(17) << labelFileName << "   "
+              << labelRECFM << "   "
+              << std::setw(7) << labelBLKSIZE << " "
+              << std::setw(5) << labelLRECL << "       "
+              << std::setw(7) << labelBLKCOUNT << "   "
+              << std::setw(7) << auditBLKCOUNT << std::endl;
+}
+
+void printDetail(const AwsTapeBlockHeader& header, const std::vector<uint8_t>& buffer, VerbosityLevel verbosity) {
+    if (verbosity >= VerbosityLevel::Detailed) {
+        std::cout << "Block Header:" << std::endl;
+        std::cout << "  Current block length: " << header.curblkl << std::endl;
+        std::cout << "  Previous block length: " << header.prvblkl << std::endl;
+        std::cout << "  Flags: ";
+        if (header.flags1 & 0x80) std::cout << "NEWREC ";
+        if (header.flags1 & 0x40) std::cout << "TAPEMARK ";
+        if (header.flags1 & 0x20) std::cout << "ENDREC ";
+        std::cout << "(0x" << std::uppercase << std::hex << static_cast<int>(header.flags1) << std::dec << ")" << std::endl;
+    }
+
+    if (verbosity >= VerbosityLevel::Debug) {
+        std::cout << "  Header raw data: ";
+        for (size_t i = 0; i < sizeof(AwsTapeBlockHeader); ++i) {
+            std::cout << std::setw(2) << std::setfill('0') << std::uppercase << std::hex
+                      << static_cast<int>(reinterpret_cast<const uint8_t*>(&header)[i]) << " ";
+        }
+        std::cout << std::dec << std::endl;
+    }
+}
+
+std::string ebcdicToAscii(const std::vector<uint8_t>& ebcdicData) {
+    std::string asciiData;
+    asciiData.reserve(ebcdicData.size());
+    for (uint8_t c : ebcdicData) {
+        asciiData.push_back(ebcdicToAsciiTable[c]);
+    }
+    return asciiData;
+}
+
+void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
+    static struct option long_options[] = {
+        {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+
+    while ((opt = getopt_long(argc, argv, "vh", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'v':
+                if (options.verbosity < VerbosityLevel::Debug) {
+                    options.verbosity = static_cast<VerbosityLevel>(static_cast<int>(options.verbosity) + 1);
+                }
+                break;
+            case 'h':
+                std::cout << "Usage: " << argv[0] << " [-v] [-vv] [-vvv] [--verbose] [--help] file1 [file2 ...]" << std::endl;
+                std::cout << "  -v, --verbose  Increase verbosity (can be used multiple times)" << std::endl;
+                std::cout << "  -h, --help     Display this help message" << std::endl;
+                exit(0);
+            default:
+                std::cerr << "Unknown option. Use --help for usage information." << std::endl;
+                exit(1);
+        }
+    }
+
+    // Collect input files
+    for (int i = optind; i < argc; i++) {
+        options.inputFiles.push_back(argv[i]);
+    }
+
+    if (options.inputFiles.empty()) {
+        std::cerr << "Error: No input files specified. Use --help for usage information." << std::endl;
+        exit(1);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    ProgramOptions options;
+    parseCommandLine(argc, argv, options);
+
+    for (const auto& file : options.inputFiles) {
+        if (options.verbosity >= VerbosityLevel::Normal) {
+            std::cout << "Processing file: " << file << std::endl;
+        }
+        processTape(file, options.verbosity);
+    }
+
+    return 0;
+}
