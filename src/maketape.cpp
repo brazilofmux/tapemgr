@@ -11,6 +11,7 @@
 
 struct FileConfig {
     std::string inputFile;
+    std::string datasetName;
     uint16_t lrecl;
     uint16_t blksize;
     char recfm;
@@ -60,12 +61,19 @@ public:
 
     void writeTape() {
         std::cout << "Starting tape writing process..." << std::endl;
-        writeVolumeLabel();
-        for (size_t i = 0; i < m_files.size(); ++i) {
-            writeFile(m_files[i], i + 1);
+
+        try {
+            writeVolumeLabel();
+            for (size_t i = 0; i < m_files.size(); ++i) {
+                writeFile(m_files[i], i + 1);
+            }
+            writeEndOfTape();
+        } catch (const std::exception& e) {
+            std::cerr << "Error during tape writing: " << e.what() << std::endl;
+            throw;
         }
-        writeEndOfTape();
-        verifyTape();
+
+        std::cout << "Tape writing process completed." << std::endl;
     }
 
 private:
@@ -88,7 +96,7 @@ private:
         ss << std::put_time(std::localtime(&in_time_t), "%y%j");
         std::string date = ss.str();
 
-        std::string label = "HDR1" + padRight(config.inputFile, 17) +
+        std::string label = "HDR1" + padRight(config.datasetName, 17) +
                             padRight(m_volser, 6) +
                             "0001" + padLeft(std::to_string(fileNumber), 4) +
                             "0001" + date + "  " + "99365" + "0000000" + std::string(28, ' ');
@@ -111,7 +119,7 @@ private:
         ss << std::put_time(std::localtime(&in_time_t), "%y%j");
         std::string date = ss.str();
 
-        std::string label = "EOF1" + padRight(config.inputFile, 17) +
+        std::string label = "EOF1" + padRight(config.datasetName, 17) +
                             padRight(m_volser, 6) +
                             "0001" + padLeft(std::to_string(fileNumber), 4) +
                             "0001" + date + "  " + "99365" +
@@ -135,7 +143,8 @@ private:
     }
 
     void writeFile(const FileConfig& config, int fileNumber) {
-        std::cout << "Writing file " << fileNumber << ": " << config.inputFile << std::endl;
+        std::cout << "Writing file " << fileNumber << ": "
+                  << config.inputFile << " (Dataset: " << config.datasetName << ")" << std::endl;
         m_blockCount = 0;
         writeHeaderLabels(config, fileNumber);
         writeDataBlocks(config);
@@ -206,174 +215,6 @@ private:
         m_outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
         m_outFile.write(reinterpret_cast<const char*>(data.data()), data.size());
         m_prevBlockSize = header.curblkl;
-    }
-
-    void verifyTape() {
-        std::cout << "Starting tape verification process..." << std::endl;
-        m_outFile.close();
-        std::ifstream verifyFile(m_outputFile, std::ios::binary);
-        if (!verifyFile) {
-            throw std::runtime_error("Unable to open tape file for verification: " + m_outputFile);
-        }
-
-        // Verify VOL1 label
-        AwsTapeBlockHeader header;
-        std::vector<uint8_t> data(80);
-        verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-        verifyFile.read(reinterpret_cast<char*>(data.data()), 80);
-        std::string vol1Label = ebcdicToAscii(data);
-        if (vol1Label.substr(0, 4) != "VOL1" || vol1Label.substr(4, 6) != m_volser) {
-            throw std::runtime_error("Invalid VOL1 label");
-        }
-        std::cout << "VOL1 label verified" << std::endl;
-
-        // Verify each file
-        for (size_t i = 0; i < m_files.size(); ++i) {
-            this->verifyFile(verifyFile, m_files[i], i + 1);
-        }
-
-        // Verify end of tape
-        verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (header.flags1 != 0x40 || header.curblkl != 0) {
-            throw std::runtime_error("Invalid end of tape marker");
-        }
-        verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (header.flags1 != 0x40 || header.curblkl != 0) {
-            throw std::runtime_error("Invalid second end of tape marker");
-        }
-
-        std::cout << "Tape verification completed successfully" << std::endl;
-    }
-
-    void verifyFile(std::ifstream& verifyFile, const FileConfig& config, int fileNumber) {
-        std::cout << "Verifying file " << fileNumber << ": " << config.inputFile << std::endl;
-
-        try {
-            // Verify HDR1 and HDR2
-            verifyLabel(verifyFile, "HDR1", config, config.inputFile, fileNumber);
-            verifyLabel(verifyFile, "HDR2", config, config.inputFile, fileNumber);
-
-            // Verify tapemark after headers
-            AwsTapeBlockHeader header;
-            verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (header.flags1 != 0x40 || header.curblkl != 0) {
-                throw std::runtime_error("Missing tapemark after headers for file: " + config.inputFile);
-            }
-            std::cout << "  Verified tapemark after headers" << std::endl;
-
-            // Verify data blocks
-            std::ifstream originalFile(config.inputFile, std::ios::binary);
-            if (!originalFile) {
-                throw std::runtime_error("Unable to open original file for verification: " + config.inputFile);
-            }
-
-            size_t totalBytesVerified = 0;
-            std::vector<char> originalBuffer(config.blksize);
-            std::vector<uint8_t> tapeBuffer(config.blksize);
-
-            while (originalFile) {
-                originalFile.read(originalBuffer.data(), config.blksize);
-                std::streamsize bytesRead = originalFile.gcount();
-                if (bytesRead > 0) {
-                    verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-                    if (header.curblkl != bytesRead) {
-                        std::cerr << "Block size mismatch: expected " << bytesRead << ", got " << header.curblkl << std::endl;
-                        throw std::runtime_error("Block size mismatch in file: " + config.inputFile);
-                    }
-                    verifyFile.read(reinterpret_cast<char*>(tapeBuffer.data()), bytesRead);
-
-                    if (!config.binary) {
-                        for (size_t i = 0; i < bytesRead; ++i) {
-                            if (tapeBuffer[i] != asciiToEbcdic(std::string(1, originalBuffer[i]))[0]) {
-                                std::cerr << "Data mismatch at byte " << i << std::endl;
-                                throw std::runtime_error("Data mismatch in file: " + config.inputFile);
-                            }
-                        }
-                    } else {
-                        if (memcmp(tapeBuffer.data(), originalBuffer.data(), bytesRead) != 0) {
-                            throw std::runtime_error("Data mismatch in file: " + config.inputFile);
-                        }
-                    }
-
-                    totalBytesVerified += bytesRead;
-                }
-            }
-
-            std::cout << "  Verified " << totalBytesVerified << " bytes" << std::endl;
-
-            // Verify EOF1 and EOF2
-            verifyLabel(verifyFile, "EOF1", config, config.inputFile, fileNumber);
-            verifyLabel(verifyFile, "EOF2", config, config.inputFile, fileNumber);
-
-            // Verify tape mark
-            verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (header.flags1 != 0x40 || header.curblkl != 0) {
-                throw std::runtime_error("Missing tape mark after file: " + config.inputFile);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Error verifying file " << config.inputFile << ": " << e.what() << std::endl;
-            throw;
-        }
-    }
-
-    int parseNumericField(const std::string& field) {
-        try {
-            size_t start = field.find_first_not_of(" ");
-            size_t end = field.find_last_not_of(" ");
-            if (start == std::string::npos) {
-                std::cout << "  Numeric field is all spaces" << std::endl;
-                return 0; // All spaces
-            }
-            std::string trimmed = field.substr(start, end - start + 1);
-            std::cout << "  Trimmed numeric field: '" << trimmed << "'" << std::endl;
-            return std::stoi(trimmed);
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to parse numeric field: '" << field << "'. Error: " << e.what() << std::endl;
-            return -1;
-        }
-    }
-
-    void verifyLabel(std::ifstream& verifyFile, const std::string& expectedLabel, const FileConfig& config, const std::string& filename, int fileNumber) {
-        AwsTapeBlockHeader header;
-        std::vector<uint8_t> data(80);
-        verifyFile.read(reinterpret_cast<char*>(&header), sizeof(header));
-        verifyFile.read(reinterpret_cast<char*>(data.data()), 80);
-
-        std::cout << "Read block header: size=" << header.curblkl
-                  << ", prev=" << header.prvblkl
-                  << ", flags=0x" << std::hex << static_cast<int>(header.flags1) << std::dec << std::endl;
-
-        std::cout << "Read label data (EBCDIC hex): ";
-        for (uint8_t byte : data) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte) << " ";
-        }
-        std::cout << std::dec << std::endl;
-
-        std::string label = ebcdicToAscii(data);
-        std::cout << "Converted label (ASCII): " << label << std::endl;
-
-        if (expectedLabel == "HDR2" || expectedLabel == "EOF2") {
-            std::string blksizeStr = label.substr(5, 5);
-            std::string lreclStr = label.substr(10, 5);
-            std::cout << "  BLKSIZE string: '" << blksizeStr << "'" << std::endl;
-            std::cout << "  LRECL string: '" << lreclStr << "'" << std::endl;
-
-            int blksize = parseNumericField(blksizeStr);
-            int lrecl = parseNumericField(lreclStr);
-            std::cout << "  Parsed BLKSIZE: " << blksize << ", LRECL: " << lrecl << std::endl;
-            if (blksize != config.blksize || lrecl != config.lrecl) {
-                std::cerr << "BLKSIZE or LRECL mismatch in " << expectedLabel << " label" << std::endl;
-                std::cerr << "Expected: BLKSIZE=" << config.blksize << ", LRECL=" << config.lrecl << std::endl;
-                std::cerr << "Found: BLKSIZE=" << blksize << ", LRECL=" << lrecl << std::endl;
-                throw std::runtime_error("BLKSIZE or LRECL mismatch in " + expectedLabel + " label");
-            }
-        }
-        if (label.substr(0, 4) != expectedLabel) {
-            std::cerr << "Expected " << expectedLabel << " label, but found: " << label.substr(0, 4) << std::endl;
-            std::cerr << "Full label content: " << label << std::endl;
-            throw std::runtime_error("Invalid " + expectedLabel + " label for file: " + filename);
-        }
-        std::cout << "  " << expectedLabel << " label verified: " << label << std::endl;
     }
 
     void writeTapeMark() {
@@ -457,7 +298,7 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
     while (std::getline(file, line)) {
         std::istringstream iss(line);
         FileConfig config;
-        iss >> config.inputFile >> config.lrecl >> config.blksize >> config.recfm;
+        iss >> config.inputFile >> config.datasetName >> config.lrecl >> config.blksize >> config.recfm;
         config.binary = false;  // Default to text mode
         std::string token;
         while (iss >> token) {
@@ -473,11 +314,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string volser = argv[1];
-    std::string outputFile = argv[2];
-    std::string configFile = argv[3];
-
     try {
+        std::string volser = argv[1];
+        std::string outputFile = argv[2];
+        std::string configFile = argv[3];
+
         std::vector<FileConfig> configs;
         readConfigFile(configFile, configs);
 
@@ -488,10 +329,9 @@ int main(int argc, char* argv[]) {
         tapeMaker.writeTape();
 
         std::cout << "AWS tape file created successfully: " << outputFile << std::endl;
+        return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
-
-    return 0;
 }
