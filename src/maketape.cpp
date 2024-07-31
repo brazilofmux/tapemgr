@@ -198,11 +198,12 @@ private:
         label += "00";                              // Version Number
         label += formatDate(tm);                    // Creation Date
         label += formatExpirationDate(30);          // Default expriation to 30 days from now
-        label += "99365";                           // Expiration Date
         label += "0";                               // Data Set Security
         label += "000000";                          // Block Count
         label += "IBM OS/VS 370";                   // System Code
         label += std::string(3, ' ');               // Reserved
+        label += std::string(4, ' ');               // Block Count, High Order
+        std::cout << label << std::endl;
         return label.substr(0, 80);
     }
 
@@ -339,14 +340,13 @@ private:
         writeTapeMark();
         std::string eof1 = createEOF1Label(config, fileNumber);
         std::string eof2 = createEOF2Label(config);
-
         writeBlock(asciiToEbcdic(eof1), 0xA0, true);
         writeBlock(asciiToEbcdic(eof2), 0xA0, true);
+        writeTapeMark();
     }
 
     void writeEndOfTape() {
         std::cout << "Writing end of tape markers" << std::endl;
-        writeTapeMark();
         writeTapeMark();
     }
 

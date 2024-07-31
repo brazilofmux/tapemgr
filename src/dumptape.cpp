@@ -200,9 +200,17 @@ void processEOF1Label(const EOF1Label& label, VerbosityLevel verbosity) {
 void processEOF2Label(const EOF2Label& label, VerbosityLevel verbosity) {
     if (verbosity >= VerbosityLevel::Normal) {
         std::cout << "EOF2 Label found" << std::endl;
+        std::cout << "  Record Format: " << ebcdicToAsciiTable[static_cast<unsigned char>(label.recordFormat)] << std::endl;
+        std::cout << "  Block Attribute: " << ebcdicToAsciiTable[static_cast<unsigned char>(label.blockAttribute)] << std::endl;
     }
     if (verbosity >= VerbosityLevel::Detailed) {
-        processHDR2Label(label, verbosity);  // EOF2 has the same structure as HDR2
+        std::cout << "  Block Length: " << ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(label.blockLength), 5) << std::endl;
+        std::cout << "  Record Length: " << ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(label.recordLength), 5) << std::endl;
+        std::cout << "  Tape Density: " << ebcdicToAsciiTable[static_cast<unsigned char>(label.tapeDensity)] << std::endl;
+        std::cout << "  Job/Step: " << ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(label.jobStepIdentification), 17) << std::endl;
+        std::cout << "  Tape Recording Technique: " << ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(label.tapeRecordingTechnique), 2) << std::endl;
+        std::cout << "  Control Character: " << ebcdicToAsciiTable[static_cast<unsigned char>(label.controlCharacter)] << std::endl;
+        std::cout << "  Device Serial Number: " << ebcdicToAsciiString(reinterpret_cast<const unsigned char*>(label.deviceSerialNumber), 6) << std::endl;
     }
 }
 
