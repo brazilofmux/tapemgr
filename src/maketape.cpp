@@ -139,7 +139,7 @@ private:
     void writeVolumeLabel() {
         std::cout << "Writing VOL1 label" << std::endl;
         std::string label = createVOL1Label();
-        writeBlock(asciiToEbcdic(label), 0xA0);
+        writeBlock(asciiToEbcdic(label), 0xA0, true);
     }
 
     void writeFile(const FileConfig& config, int fileNumber) {
@@ -156,8 +156,8 @@ private:
         std::string hdr1 = createHDR1Label(config, fileNumber);
         std::string hdr2 = createHDR2Label(config);
 
-        writeBlock(asciiToEbcdic(hdr1), 0xA0);
-        writeBlock(asciiToEbcdic(hdr2), 0xA0);
+        writeBlock(asciiToEbcdic(hdr1), 0xA0, true);
+        writeBlock(asciiToEbcdic(hdr2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -195,8 +195,8 @@ private:
         std::string eof1 = createEOF1Label(config, fileNumber);
         std::string eof2 = createEOF2Label(config);
 
-        writeBlock(asciiToEbcdic(eof1), 0xA0);
-        writeBlock(asciiToEbcdic(eof2), 0xA0);
+        writeBlock(asciiToEbcdic(eof1), 0xA0, true);
+        writeBlock(asciiToEbcdic(eof2), 0xA0, true);
     }
 
     void writeEndOfTape() {
@@ -205,10 +205,10 @@ private:
         writeTapeMark();
     }
 
-    void writeBlock(const std::vector<uint8_t>& data, uint8_t flags) {
-        //if ((flags & 0xA0) == 0xA0 && data.size() != 80) {
-        //    throw std::runtime_error("Label block size must be 80 bytes");
-        //}
+    void writeBlock(const std::vector<uint8_t>& data, uint8_t flags, bool isLabel = false) {
+        if (isLabel && data.size() != 80) {
+            throw std::runtime_error("Label block size must be 80 bytes");
+        }
 
         AwsTapeBlockHeader header = {
             static_cast<uint16_t>(data.size()),
