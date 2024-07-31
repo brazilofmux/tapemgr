@@ -197,30 +197,54 @@ private:
 
     void writeDataBlocks(const FileConfig& config) {
         std::cout << "  Writing data blocks" << std::endl;
-        std::ifstream inFile(config.inputFile, std::ios::binary);
-        if (!inFile) {
-            throw std::runtime_error("Unable to open input file: " + config.inputFile);
-        }
+        std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
+        std::vector<uint8_t> block(config.blksize, 0x40);  // Initialize with EBCDIC space
+        std::vector<uint8_t> record(config.lrecl);
+        size_t blockOffset = 0;
 
-        size_t totalBytesWritten = 0;
-        std::vector<char> buffer(config.blksize);
-        while (inFile) {
-            inFile.read(buffer.data(), config.blksize);
-            std::streamsize bytesRead = inFile.gcount();
-            if (bytesRead > 0) {
-                std::vector<uint8_t> block(config.blksize, 0x40);  // Initialize with EBCDIC space
-                std::copy(buffer.begin(), buffer.begin() + bytesRead, block.begin());
-                if (!config.binary) {
-                    for (auto& byte : block) {
-                        byte = asciiToEbcdic(std::string(1, byte))[0];
-                    }
-                }
-                writeBlock(block, 0xA0);
+        auto writeCurrentBlock = [&]() {
+            if (blockOffset > 0) {
+                writeBlock(std::vector<uint8_t>(block.begin(), block.begin() + blockOffset), 0xA0);
                 m_blockCount++;
-                totalBytesWritten += config.blksize;
+                blockOffset = 0;
+            }
+        };
+
+        if (config.binary) {
+            while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
+                std::copy(record.begin(), record.end(), block.begin() + blockOffset);
+                blockOffset += config.lrecl;
+                if (blockOffset == config.blksize) {
+                    writeCurrentBlock();
+                }
+            }
+        } else {
+            std::string line;
+            while (std::getline(inFile, line)) {
+                // Remove Windows-style line ending if present
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+
+                std::vector<uint8_t> ebcdicLine = asciiToEbcdic(line);
+                size_t lineSize = std::min(ebcdicLine.size(), static_cast<size_t>(config.lrecl));
+                std::copy(ebcdicLine.begin(), ebcdicLine.begin() + lineSize, record.begin());
+
+                // Pad with EBCDIC spaces if necessary
+                if (lineSize < static_cast<size_t>(config.lrecl)) {
+                    std::fill(record.begin() + lineSize, record.end(), 0x40);
+                }
+
+                std::copy(record.begin(), record.end(), block.begin() + blockOffset);
+                blockOffset += config.lrecl;
+                if (blockOffset == config.blksize) {
+                    writeCurrentBlock();
+                }
             }
         }
-        std::cout << "    Wrote " << totalBytesWritten << " bytes" << std::endl;
+
+        // Write any remaining partial block
+        writeCurrentBlock();
     }
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
