@@ -104,13 +104,17 @@ private:
     }
 
     std::string createHDR2Label(const FileConfig& config) {
-        std::string label = "HDR2" + std::string(1, config.recfm) +
+        std::string label = "HDR2" +
+                            std::string(1, config.recfm) +
                             padLeft(std::to_string(config.blksize), 5) +
                             padLeft(std::to_string(config.lrecl), 5) +
-                            "0HERCULES/MAKETAPE    B" + std::string(36, ' ');
+                            "0" +  // Tape density (0 for 3480 and later)
+                            "0" +  // Dataset position
+                            padRight("HERCULES/MAKETAPE", 17) +
+                            (config.blksize > config.lrecl ? "B" : " ") +  // Record attribute
+                            std::string(45, ' ');  // Reserved space
         return label.substr(0, 80);
     }
-
 
     std::string createEOF1Label(const FileConfig& config, int fileNumber) {
         auto now = std::chrono::system_clock::now();
@@ -129,11 +133,7 @@ private:
     }
 
     std::string createEOF2Label(const FileConfig& config) {
-        std::string label = "EOF2" + std::string(1, config.recfm) +
-                            padLeft(std::to_string(config.blksize), 5) +
-                            padLeft(std::to_string(config.lrecl), 5) +
-                            "0HERCULES/MAKETAPE    B" + std::string(36, ' ');
-        return label.substr(0, 80);
+        return createHDR2Label(config);
     }
 
     void writeVolumeLabel() {
@@ -206,6 +206,10 @@ private:
     }
 
     void writeBlock(const std::vector<uint8_t>& data, uint8_t flags) {
+        //if ((flags & 0xA0) == 0xA0 && data.size() != 80) {
+        //    throw std::runtime_error("Label block size must be 80 bytes");
+        //}
+
         AwsTapeBlockHeader header = {
             static_cast<uint16_t>(data.size()),
             m_prevBlockSize,
