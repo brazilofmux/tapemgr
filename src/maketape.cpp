@@ -14,9 +14,9 @@ struct FileConfig {
     std::string datasetName;
     uint16_t lrecl;
     uint16_t blksize;
-    char recfm;
-    bool blocked;
-    bool spanned;
+    std::string recfm;      // F, FB, V, VB, etc.
+    char recordFormat;      // F, V, or U
+    char blockAttribute;    // B, S, R, or ' '
     bool binary;
 };
 
@@ -58,8 +58,14 @@ public:
         }
 
         // Verify RECFM
-        if (config.recfm != 'F' && config.recfm != 'V' && config.recfm != 'U') {
+        if (config.recordFormat != 'F' && config.recordFormat != 'V' && config.recordFormat != 'U') {
             throw std::runtime_error("Invalid RECFM for file: " + config.inputFile);
+        }
+
+        // Verify Block Attribute
+        if (config.blockAttribute != ' ' && config.blockAttribute != 'B' &&
+            config.blockAttribute != 'S' && config.blockAttribute != 'R') {
+            throw std::runtime_error("Invalid Block Attribute for file: " + config.inputFile);
         }
 
         m_files.push_back(config);
@@ -141,7 +147,7 @@ private:
 
     std::string createHDR2Label(const FileConfig& config) {
         std::string label = "HDR2";
-        label += config.recfm;                      // Record Format
+        label += config.recordFormat;               // Record Format
         label += padLeft(std::to_string(config.blksize), 5);  // Block Length
         label += padLeft(std::to_string(config.lrecl), 5);    // Record Length
         label += "0";                               // Tape Density
@@ -150,18 +156,7 @@ private:
         label += "  ";                              // Tape Recording Technique
         label += " ";                               // Control Character
         label += " ";                               // Reserved
-
-        // Determine Block Attribute
-        char blockAttribute = ' ';
-        if (config.blksize > config.lrecl) {
-            if (config.recfm == 'V' || config.recfm == 'F') {
-                blockAttribute = 'B';  // Blocked
-            }
-        } else if (config.recfm == 'V') {
-            blockAttribute = 'S';  // Spanned (for variable length records)
-        }
-        label += blockAttribute;
-
+        label += config.blockAttribute;
         label += std::string(2, ' ');               // Reserved
         label += std::string(6, ' ');               // Device Serial Number
         label += " ";                               // Checkpoint Data Set Identifier
@@ -374,11 +369,41 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
         std::istringstream iss(line);
         FileConfig config;
         iss >> config.inputFile >> config.datasetName >> config.lrecl >> config.blksize >> config.recfm;
+
+        // Set record format
+        config.recordFormat = config.recfm[0];  // F, V, or U
+
+        // Set block attribute
+        config.blockAttribute = ' ';
+        if (config.recfm.find('B') != std::string::npos) {
+            config.blockAttribute = 'B';  // Blocked
+        }
+        if (config.recfm.find('S') != std::string::npos) {
+            config.blockAttribute = (config.blockAttribute == 'B') ? 'R' : 'S';  // Spanned or Blocked and Spanned
+        }
+
+        // Warnings and fixups.
+        if (config.recfm[0] == 'F') {
+            if (config.blksize > config.lrecl) {
+                if (config.recfm == "F") {
+                    std::cout << "Warning: BLKSIZE > LRECL for file " << config.inputFile
+                              << ". Changing RECFM from 'F' to 'FB'." << std::endl;
+                    config.recfm = "FB";
+                }
+                config.blockAttribute = 'B';
+            } else if (config.blksize == config.lrecl && config.recfm == "FB") {
+                std::cout << "Note: BLKSIZE == LRECL for file " << config.inputFile
+                          << ". 'FB' is accepted but 'F' would be more typical." << std::endl;
+            }
+        }
+
         config.binary = false;  // Default to text mode
+
         std::string token;
         while (iss >> token) {
             if (token == "BINARY") config.binary = true;
         }
+
         configs.push_back(config);
     }
 }
