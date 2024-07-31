@@ -15,6 +15,8 @@ struct FileConfig {
     uint16_t lrecl;
     uint16_t blksize;
     char recfm;
+    bool blocked;
+    bool spanned;
     bool binary;
 };
 
@@ -148,7 +150,18 @@ private:
         label += "  ";                              // Tape Recording Technique
         label += " ";                               // Control Character
         label += " ";                               // Reserved
-        label += (config.blksize > config.lrecl ? "B" : " ");  // Block Attribute
+
+        // Determine Block Attribute
+        char blockAttribute = ' ';
+        if (config.blksize > config.lrecl) {
+            if (config.recfm == 'V' || config.recfm == 'F') {
+                blockAttribute = 'B';  // Blocked
+            }
+        } else if (config.recfm == 'V') {
+            blockAttribute = 'S';  // Spanned (for variable length records)
+        }
+        label += blockAttribute;
+
         label += std::string(2, ' ');               // Reserved
         label += std::string(6, ' ');               // Device Serial Number
         label += " ";                               // Checkpoint Data Set Identifier
