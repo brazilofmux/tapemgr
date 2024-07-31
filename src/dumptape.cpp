@@ -206,6 +206,136 @@ void processEOF2Label(const EOF2Label& label, VerbosityLevel verbosity) {
     }
 }
 
+bool isValidVolumeSerialChar(unsigned char c) {
+    return (c >= 0xC1 && c <= 0xC9) || (c >= 0xD1 && c <= 0xD9) || (c >= 0xE2 && c <= 0xE9) || (c >= 0xF0 && c <= 0xF9) || c == 0x40;
+}
+
+bool validateVOL1Label(const VOL1Label& label) {
+    bool isValid = true;
+
+    // Check volume serial number
+    if (!std::all_of(label.volumeSerial, label.volumeSerial + 6, isValidVolumeSerialChar)) {
+        std::cout << "Warning: Invalid characters in volume serial number. Only alphanumeric characters and spaces are allowed." << std::endl;
+        isValid = false;
+    }
+
+    // Check if volume serial is all spaces
+    if (std::all_of(label.volumeSerial, label.volumeSerial + 6, [](unsigned char c) { return c == 0x40; })) {
+        std::cout << "Warning: Volume serial number is blank." << std::endl;
+        isValid = false;
+    }
+
+    // Check reserved fields
+    if (label.reserved1 != 0x40) {
+        std::cout << "Warning: Reserved field 1 in VOL1 label is not blank." << std::endl;
+        isValid = false;
+    }
+    if (!std::all_of(label.reserved2, label.reserved2 + 25, [](unsigned char c) { return c == 0x40; })) {
+        std::cout << "Warning: Reserved field 2 in VOL1 label is not blank." << std::endl;
+        isValid = false;
+    }
+    if (!std::all_of(label.reserved3, label.reserved3 + 29, [](unsigned char c) { return c == 0x40; })) {
+        std::cout << "Warning: Reserved field 3 in VOL1 label is not blank." << std::endl;
+        isValid = false;
+    }
+
+    return isValid;
+}
+
+bool validateHDR1Label(const HDR1Label& label) {
+    bool isValid = true;
+
+    // Validate creation date and expiration date
+    auto validateDate = [](const unsigned char* date, const char* fieldName) {
+        if (!std::all_of(date, date + 6, [](unsigned char c) { return (c >= 0xF0 && c <= 0xF9) || c == 0x40; })) {
+            std::cout << "Warning: Invalid " << fieldName << " format in HDR1 label. Expected format is CYYDDD." << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    isValid &= validateDate(reinterpret_cast<const unsigned char*>(label.creationDate), "creation date");
+    isValid &= validateDate(reinterpret_cast<const unsigned char*>(label.expirationDate), "expiration date");
+
+    // Validate dataset name
+    if (!std::all_of(label.dataSetIdentifier, label.dataSetIdentifier + 17, 
+                     [](unsigned char c) { return isValidVolumeSerialChar(c) || c == 0x4B; })) {
+        std::cout << "Warning: Invalid characters in dataset name. Only alphanumeric characters, spaces, and periods are allowed." << std::endl;
+        isValid = false;
+    }
+
+    // Validate dataset serial number
+    if (!std::all_of(label.dataSetSerialNumber, label.dataSetSerialNumber + 6, isValidVolumeSerialChar)) {
+        std::cout << "Warning: Invalid characters in dataset serial number. Only alphanumeric characters and spaces are allowed." << std::endl;
+        isValid = false;
+    }
+
+    // Validate volume sequence number and dataset sequence number
+    auto validateSequenceNumber = [](const unsigned char* number, const char* fieldName) {
+        if (!std::all_of(number, number + 4, [](unsigned char c) { return c >= 0xF0 && c <= 0xF9; })) {
+            std::cout << "Warning: Invalid " << fieldName << " in HDR1 label. Expected a 4-digit number." << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    isValid &= validateSequenceNumber(reinterpret_cast<const unsigned char*>(label.volumeSequenceNumber), "volume sequence number");
+    isValid &= validateSequenceNumber(reinterpret_cast<const unsigned char*>(label.dataSetSequenceNumber), "dataset sequence number");
+
+    return isValid;
+}
+
+bool validateHDR2Label(const HDR2Label& label) {
+    bool isValid = true;
+
+    // Validate record format (F: 0xC6, V: 0xE5, U: 0xE4)
+    unsigned char recordFormat = static_cast<unsigned char>(label.recordFormat);
+    if (recordFormat != 0xC6 && recordFormat != 0xE5 && recordFormat != 0xE4) {
+        std::cout << "Warning: Invalid record format in HDR2 label. Expected F, V, or U." << std::endl;
+        std::cout << "Actual value: 0x" << std::hex << static_cast<int>(recordFormat) << std::dec << std::endl;
+        isValid = false;
+    }
+
+    // Validate block length and record length
+    auto validateLength = [](const unsigned char* length, const char* fieldName) {
+        if (!std::all_of(length, length + 5, [](unsigned char c) { return c >= 0xF0 && c <= 0xF9; })) {
+            std::cout << "Warning: Invalid " << fieldName << " in HDR2 label. Expected a 5-digit number." << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    isValid &= validateLength(reinterpret_cast<const unsigned char*>(label.blockLength), "block length");
+    isValid &= validateLength(reinterpret_cast<const unsigned char*>(label.recordLength), "record length");
+
+    // Validate tape density (0-9: 0xF0-0xF9, space: 0x40)
+    unsigned char tapeDensity = static_cast<unsigned char>(label.tapeDensity);
+    if (!((tapeDensity >= 0xF0 && tapeDensity <= 0xF9) || tapeDensity == 0x40)) {
+        std::cout << "Warning: Invalid tape density in HDR2 label. Expected a digit or space." << std::endl;
+        std::cout << "Actual value: 0x" << std::hex << static_cast<int>(tapeDensity) << std::dec << std::endl;
+        isValid = false;
+    }
+
+    // Validate data set position (0: 0xF0, 1: 0xF1)
+    unsigned char dataSetPosition = static_cast<unsigned char>(label.dataSetPosition);
+    if (dataSetPosition != 0xF0 && dataSetPosition != 0xF1) {
+        std::cout << "Warning: Invalid data set position in HDR2 label. Expected 0 or 1." << std::endl;
+        std::cout << "Actual value: 0x" << std::hex << static_cast<int>(dataSetPosition) << std::dec << std::endl;
+        isValid = false;
+    }
+
+    // Validate block attribute (B: 0xC2, S: 0xE2, R: 0xD9, space: 0x40)
+    unsigned char blockAttribute = static_cast<unsigned char>(label.blockAttribute);
+    if (blockAttribute != 0xC2 && blockAttribute != 0xE2 && 
+        blockAttribute != 0xD9 && blockAttribute != 0x40) {
+        std::cout << "Warning: Invalid block attribute in HDR2 label. Expected B, S, R, or space." << std::endl;
+        std::cout << "Actual value: 0x" << std::hex << static_cast<int>(blockAttribute) << std::dec << std::endl;
+        isValid = false;
+    }
+
+    return isValid;
+}
+
 void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
     std::ifstream file(inputFile, std::ios::binary);
     if (!file) {
@@ -245,7 +375,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
 
     while (true) {
         std::streampos blockStart = file.tellg();
-        
+
         size_t headerSize = readBlockHeader(file, header);
         if (file.eof()) break;
 
@@ -258,7 +388,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
 
         if (header.curblkl > 0) {
             size_t dataSize = readDataBlock(file, buffer, header.curblkl);
-            
+
             totalBlocks++;
             totalBytes += dataSize;
 
@@ -296,6 +426,30 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                         }
                         std::cout << std::dec << std::endl;
                     }
+                }
+            }
+
+            if (labelIdentifier == "VOL1") {
+                const VOL1Label* vol1 = reinterpret_cast<const VOL1Label*>(buffer.data());
+                if (validateVOL1Label(*vol1)) {
+                    processVOL1Label(*vol1, verbosity);
+                } else {
+                    std::cout << "VOL1 label validation failed" << std::endl;
+                }
+            } else if (labelIdentifier == "HDR1") {
+                const HDR1Label* hdr1 = reinterpret_cast<const HDR1Label*>(buffer.data());
+                if (validateHDR1Label(*hdr1)) {
+                    processHDR1Label(*hdr1, verbosity);
+                    fileCount++;
+                } else {
+                    std::cout << "HDR1 label validation failed" << std::endl;
+                }
+            } else if (labelIdentifier == "HDR2") {
+                const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
+                if (validateHDR2Label(*hdr2)) {
+                    processHDR2Label(*hdr2, verbosity);
+                } else {
+                    std::cout << "HDR2 label validation failed" << std::endl;
                 }
             }
 
