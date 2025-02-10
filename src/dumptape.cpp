@@ -42,51 +42,51 @@ enum class PrintOption {
 };
 
 struct VOL1Label {
-    char identifier[3];
-    char labelNumber;
-    char volumeSerial[6];
-    char reserved1;
-    char vtocPointer[5];
-    char reserved2[25];
-    char ownerCode[10];
-    char reserved3[29];
+    unsigned char identifier[3];
+    unsigned char labelNumber;
+    unsigned char volumeSerial[6];
+    unsigned char reserved1;
+    unsigned char vtocPointer[5];
+    unsigned char reserved2[25];
+    unsigned char ownerCode[10];
+    unsigned char reserved3[29];
 };
 
 struct HDR1Label {
-    char identifier[3];
-    char labelNumber;
-    char dataSetIdentifier[17];
-    char dataSetSerialNumber[6];
-    char volumeSequenceNumber[4];
-    char dataSetSequenceNumber[4];
-    char generationNumber[4];
-    char versionNumber[2];
-    char creationDate[6];
-    char expirationDate[6];
-    char dataSetSecurity;
-    char blockCount[6];
-    char systemCode[13];
-    char reserved[3];
+    unsigned char identifier[3];
+    unsigned char labelNumber;
+    unsigned char dataSetIdentifier[17];
+    unsigned char dataSetSerialNumber[6];
+    unsigned char volumeSequenceNumber[4];
+    unsigned char dataSetSequenceNumber[4];
+    unsigned char generationNumber[4];
+    unsigned char versionNumber[2];
+    unsigned char creationDate[6];
+    unsigned char expirationDate[6];
+    unsigned char dataSetSecurity;
+    unsigned char blockCount[6];
+    unsigned char systemCode[13];
+    unsigned char reserved[3];
 };
 
 struct HDR2Label {
-    char identifier[3];
-    char labelNumber;
-    char recordFormat;
-    char blockLength[5];
-    char recordLength[5];
-    char tapeDensity;
-    char dataSetPosition;
-    char jobStepIdentification[17];
-    char tapeRecordingTechnique[2];
-    char controlCharacter;
-    char reserved1;
-    char blockAttribute;
-    char reserved2[2];
-    char deviceSerialNumber[6];
-    char checkpointDataSetId;
-    char reserved3[22];
-    char largeBlockLength[10];
+    unsigned char identifier[3];
+    unsigned char labelNumber;
+    unsigned char recordFormat;
+    unsigned char blockLength[5];
+    unsigned char recordLength[5];
+    unsigned char tapeDensity;
+    unsigned char dataSetPosition;
+    unsigned char jobStepIdentification[17];
+    unsigned char tapeRecordingTechnique[2];
+    unsigned char controlCharacter;
+    unsigned char reserved1;
+    unsigned char blockAttribute;
+    unsigned char reserved2[2];
+    unsigned char deviceSerialNumber[6];
+    unsigned char checkpointDataSetId;
+    unsigned char reserved3[22];
+    unsigned char largeBlockLength[10];
 };
 
 // EOF1 and EOV1 have the same structure as HDR1
@@ -275,8 +275,11 @@ bool validateVOL1Label(const VOL1Label& label) {
     }
 
     // Check reserved fields
-    if (label.reserved1 != 0x40) {
-        std::cout << "Warning: Reserved field 1 in VOL1 label is not blank." << std::endl;
+    if (label.reserved1 != 0x40 && label.reserved1 != 0xF0) {
+        std::cout << "Warning: Reserved field 1 in VOL1 label (0x" << std::hex
+                  << std::setw(2) << std::setfill('0') << std::uppercase
+                  << static_cast<int>(label.reserved1)
+                  << ") is neither blank nor zero." << std::dec << std::endl;
         isValid = false;
     }
     if (!std::all_of(label.reserved2, label.reserved2 + 25, [](unsigned char c) { return c == 0x40; })) {
