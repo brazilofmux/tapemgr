@@ -97,6 +97,47 @@ using EOV1Label = HDR1Label;
 using EOF2Label = HDR2Label;
 using EOV2Label = HDR2Label;
 
+struct BlockDescriptorWord {
+    unsigned char length_high;
+    unsigned char length_low;
+    unsigned char reserved_high;
+    unsigned char reserved_low;
+
+    uint16_t getLength() const {
+        return (length_high << 8) | length_low;
+    }
+
+    uint16_t getReserved() const {
+        return (reserved_high << 8) | reserved_low;
+    }
+};
+
+struct RecordDescriptorWord {
+    unsigned char length_high;
+    unsigned char length_low;
+    unsigned char reserved_high;
+    unsigned char reserved_low;
+
+    uint16_t getLength() const {
+        return (length_high << 8) | length_low;
+    }
+
+    uint16_t getReserved() const {
+        return (reserved_high << 8) | reserved_low;
+    }
+};
+
+struct SegmentDescriptorWord {
+    unsigned char length_high;
+    unsigned char length_low;
+    unsigned char reserved;
+    unsigned char flags;
+
+    uint16_t getLength() const {
+        return (length_high << 8) | length_low;
+    }
+};
+
 // Function prototypes
 void processTape(const std::string& inputFile, VerbosityLevel verbosity);
 size_t readBlockHeader(std::ifstream& file, AwsTapeBlockHeader& header);
@@ -266,7 +307,7 @@ bool validateHDR1Label(const HDR1Label& label) {
     isValid &= validateDate(reinterpret_cast<const unsigned char*>(label.expirationDate), "expiration date");
 
     // Validate dataset name
-    if (!std::all_of(label.dataSetIdentifier, label.dataSetIdentifier + 17, 
+    if (!std::all_of(label.dataSetIdentifier, label.dataSetIdentifier + 17,
                      [](unsigned char c) { return isValidVolumeSerialChar(c) || c == 0x4B; })) {
         std::cout << "Warning: Invalid characters in dataset name. Only alphanumeric characters, spaces, and periods are allowed." << std::endl;
         isValid = false;
@@ -334,7 +375,7 @@ bool validateHDR2Label(const HDR2Label& label) {
 
     // Validate block attribute (B: 0xC2, S: 0xE2, R: 0xD9, space: 0x40)
     unsigned char blockAttribute = static_cast<unsigned char>(label.blockAttribute);
-    if (blockAttribute != 0xC2 && blockAttribute != 0xE2 && 
+    if (blockAttribute != 0xC2 && blockAttribute != 0xE2 &&
         blockAttribute != 0xD9 && blockAttribute != 0x40) {
         std::cout << "Warning: Invalid block attribute in HDR2 label. Expected B, S, R, or space." << std::endl;
         std::cout << "Actual value: 0x" << std::hex << static_cast<int>(blockAttribute) << std::dec << std::endl;
@@ -342,6 +383,154 @@ bool validateHDR2Label(const HDR2Label& label) {
     }
 
     return isValid;
+}
+
+void parseVariableFormatBlock(const std::vector<uint8_t>& buffer, size_t dataSize, VerbosityLevel verbosity) {
+    if (dataSize < 4) {
+        std::cout << "Warning: Block too small to contain BDW" << std::endl;
+        return;
+    }
+
+    const BlockDescriptorWord* bdw = reinterpret_cast<const BlockDescriptorWord*>(buffer.data());
+    uint16_t blockLength = bdw->getLength();
+
+    std::cout << "\nBlock Structure Analysis:" << std::endl;
+    std::cout << "  BDW:" << std::endl;
+    std::cout << "    Total Length: " << blockLength << " bytes (0x"
+              << std::hex << std::setw(4) << std::setfill('0') << blockLength
+              << std::dec << ")" << std::endl;
+
+    uint16_t reserved = bdw->getReserved();
+    if (reserved != 0) {
+        std::cout << "    Reserved: 0x" << std::hex << reserved
+                  << " (non-zero reserved field)" << std::dec << std::endl;
+    }
+
+    // Process each record in the block
+    size_t offset = sizeof(BlockDescriptorWord);
+    int recordNumber = 1;
+
+    while (offset < blockLength) {  // Changed from dataSize to blockLength
+        if (offset + sizeof(RecordDescriptorWord) > dataSize) {
+            std::cout << "Warning: Insufficient data for RDW at offset " << offset << std::endl;
+            break;
+        }
+
+        const RecordDescriptorWord* rdw = reinterpret_cast<const RecordDescriptorWord*>(buffer.data() + offset);
+        uint16_t recordLength = rdw->getLength();
+
+        std::cout << "  Record #" << recordNumber << ":" << std::endl;
+        std::cout << "    RDW:" << std::endl;
+        std::cout << "      Length: " << recordLength << " bytes (0x"
+                  << std::hex << std::setw(4) << std::setfill('0') << recordLength
+                  << std::dec << ")" << std::endl;
+
+        uint16_t rdwReserved = rdw->getReserved();
+        if (rdwReserved != 0) {
+            std::cout << "      Reserved: 0x" << std::hex << rdwReserved
+                      << " (non-zero reserved field)" << std::dec << std::endl;
+        }
+
+        // Print record data
+        if (verbosity >= VerbosityLevel::Debug) {
+            std::cout << "    Data:" << std::endl;
+            std::cout << "      Hex: ";
+            for (size_t i = offset + sizeof(RecordDescriptorWord);
+                 i < offset + recordLength && i < dataSize; ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0')
+                         << static_cast<int>(buffer[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+
+            std::cout << "      EBCDIC: ";
+            std::string ebcdicStr;
+            for (size_t i = offset + sizeof(RecordDescriptorWord);
+                 i < offset + recordLength && i < dataSize; ++i) {
+                std::cout << ebcdicToAsciiTable[buffer[i]];
+            }
+            std::cout << std::endl;
+        }
+
+        offset += recordLength;
+        recordNumber++;
+    }
+}
+
+void parseSpannedFormatBlock(const std::vector<uint8_t>& buffer, size_t dataSize, VerbosityLevel verbosity) {
+    if (dataSize < 4) {
+        std::cout << "Warning: Block too small to contain BDW" << std::endl;
+        return;
+    }
+
+    const BlockDescriptorWord* bdw = reinterpret_cast<const BlockDescriptorWord*>(buffer.data());
+    uint16_t blockLength = bdw->getLength();
+
+    std::cout << "\nSpanned Block Structure Analysis:" << std::endl;
+    std::cout << "  BDW:" << std::endl;
+    std::cout << "    Total Length: " << blockLength << " bytes (0x"
+              << std::hex << std::setw(4) << std::setfill('0') << blockLength
+              << std::dec << ")" << std::endl;
+
+    uint16_t reserved = bdw->getReserved();
+    if (reserved != 0) {
+        std::cout << "    Reserved: 0x" << std::hex << reserved
+                  << " (non-zero reserved field)" << std::dec << std::endl;
+    }
+
+    // Process each segment in the block
+    size_t offset = sizeof(BlockDescriptorWord);
+    int segmentNumber = 1;
+
+    while (offset < blockLength) {  // Use blockLength instead of dataSize
+        if (offset + sizeof(SegmentDescriptorWord) > dataSize) {
+            std::cout << "Warning: Insufficient data for SDW at offset " << offset << std::endl;
+            break;
+        }
+
+        const SegmentDescriptorWord* sdw = reinterpret_cast<const SegmentDescriptorWord*>(buffer.data() + offset);
+        uint16_t segmentLength = sdw->getLength();
+
+        std::cout << "  Segment #" << segmentNumber << ":" << std::endl;
+        std::cout << "    SDW:" << std::endl;
+        std::cout << "      Length: " << segmentLength << " bytes (0x"
+                  << std::hex << std::setw(4) << std::setfill('0') << segmentLength
+                  << std::dec << ")" << std::endl;
+        std::cout << "      Flags: 0x" << std::hex << static_cast<int>(sdw->flags) << std::dec;
+
+        // Decode segment flags
+        if (sdw->flags & 0x80) std::cout << " (First segment)";
+        if (sdw->flags & 0x40) std::cout << " (Last segment)";
+        if (sdw->flags & 0x20) std::cout << " (Complete logical record)";
+        std::cout << std::endl;
+
+        // Print segment data if in debug mode
+        if (verbosity >= VerbosityLevel::Debug) {
+            std::cout << "    Data:" << std::endl;
+            std::cout << "      Hex: ";
+            for (size_t i = offset + sizeof(SegmentDescriptorWord);
+                 i < offset + segmentLength && i < dataSize; ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0')
+                         << static_cast<int>(buffer[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+
+            std::cout << "      EBCDIC: ";
+            for (size_t i = offset + sizeof(SegmentDescriptorWord);
+                 i < offset + segmentLength && i < dataSize; ++i) {
+                std::cout << ebcdicToAsciiTable[buffer[i]];
+            }
+            std::cout << std::endl;
+        }
+
+        offset += segmentLength;
+        segmentNumber++;
+
+        // Optional: Add validation that we don't exceed block length
+        if (offset > blockLength) {
+            std::cout << "Warning: Segment extends beyond block length" << std::endl;
+            break;
+        }
+    }
 }
 
 void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
@@ -427,6 +616,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                 const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
                 if (validateHDR2Label(*hdr2)) {
                     processHDR2Label(*hdr2, verbosity);
+                    labelRECFM = hdr2->recordFormat;
                 } else {
                     std::cout << "HDR2 label validation failed" << std::endl;
                 }
@@ -446,6 +636,12 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                             std::cout << std::setw(2) << std::setfill('0') << std::hex << static_cast<int>(buffer[i]) << " ";
                         }
                         std::cout << std::dec << std::endl;
+                    }
+                    uint8_t recfm = ebcdicToAsciiTable[static_cast<unsigned char>(labelRECFM)];
+                    if (recfm == 'V' || recfm == 'D') {
+                        parseVariableFormatBlock(buffer, dataSize, verbosity);
+                    } else if (recfm == 'S') {
+                        parseSpannedFormatBlock(buffer, dataSize, verbosity);
                     }
                 }
             }
