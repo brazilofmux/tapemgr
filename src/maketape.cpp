@@ -415,14 +415,16 @@ private:
 
     std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
         std::vector<uint8_t> ebcdic;
-        ebcdic.reserve(input.size());  // Initial estimate, might need more or less
+        ebcdic.reserve(input.size());
 
-        const uint8_t* pString = reinterpret_cast<const uint8_t*>(input.c_str());
-        while (*pString) {
+        // Use string length instead of NUL termination
+        const uint8_t* pString = reinterpret_cast<const uint8_t*>(input.data());
+        const uint8_t* pEnd = pString + input.length();
+
+        while (pString < pEnd) {
             const uint8_t* p = pString;
             int iState = TR_CP031_START_STATE;
 
-            // Process one UTF-8 sequence
             do {
                 unsigned char ch = *p++;
                 unsigned char iColumn = tr_cp031_itt[ch];
