@@ -68,7 +68,14 @@ const unsigned char utf8_FirstByte[256] =
     3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
     4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
 };
-#define utf8_NextCodePoint(x)      (x + utf8_FirstByte[(uint8_t)*x])
+#define UTF8_SIZE1     1
+#define UTF8_SIZE2     2
+#define UTF8_SIZE3     3
+#define UTF8_SIZE4     4
+#define UTF8_CONTINUE  5
+#define UTF8_ILLEGAL   6
+
+#define EBCDIC_SUB (63)
 
 int calculateOptimalBlksize(int lrecl)
 {
@@ -423,6 +430,14 @@ private:
 
         while (pString < pEnd) {
             const uint8_t* p = pString;
+            uint8_t t = utf8_FirstByte[*p];
+            if (UTF8_CONTINUE <= t) {
+                // Unexpected/malformed byte.
+                ebcdic.push_back(static_cast<uint8_t>(EBCDIC_SUB));
+                ++pString;
+                continue;
+            }
+
             int iState = TR_CP031_START_STATE;
 
             do {
@@ -459,7 +474,7 @@ private:
             ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
 
             // Move to next UTF-8 sequence
-            pString = utf8_NextCodePoint(pString);
+            pString = pString + t;
         }
 
         return ebcdic;
