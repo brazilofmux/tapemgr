@@ -1,3 +1,5 @@
+#include "utf8tables.h"
+
 // utf/tr_utf8_cp037.txt
 //
 // 255 code points.

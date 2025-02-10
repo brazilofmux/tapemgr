@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <chrono>
 
+#include "utf8tables.h"
+
 struct FileConfig {
     std::string inputFile;
     std::string datasetName;
@@ -27,6 +29,46 @@ struct AwsTapeBlockHeader {
     uint8_t flags1;
     uint8_t flags2;
 };
+
+// This will help decode UTF-8 sequences.
+//
+// 0xxxxxxx ==> 00000000-01111111 ==> 00-7F 1 byte sequence.
+// 10xxxxxx ==> 10000000-10111111 ==> 80-BF continue
+// 110xxxxx ==> 11000000-11011111 ==> C0-DF 2 byte sequence.
+// 1110xxxx ==> 11100000-11101111 ==> E0-EF 3 byte sequence.
+// 11110xxx ==> 11110000-11110111 ==> F0-F7 4 byte sequence.
+//              11111000-11111111 illegal
+//
+// Also, RFC 3629 specifies that 0xC0, 0xC1, and 0xF5-0xFF never
+// appear in a valid sequence.
+//
+// The first byte gives the length of a sequence (UTF8_SIZE1 - UTF8_SIZE4).
+// Bytes in the middle of a sequence map to UTF8_CONTINUE.  Bytes which should
+// not appear map to UTF8_ILLEGAL.
+//
+const unsigned char utf8_FirstByte[256] =
+{
+//  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+//
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 0
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 1
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 2
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 3
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 4
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 5
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 6
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 7
+
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 8
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 9
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // A
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // B
+    6,  6,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // C
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // D
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
+    4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
+};
+#define utf8_NextCodePoint(x)      (x + utf8_FirstByte[(uint8_t)*x])
 
 int calculateOptimalBlksize(int lrecl)
 {
@@ -102,7 +144,6 @@ public:
         : m_volser(volser), m_outputFile(outputFile),
           m_prevBlockSize(0), m_blockCount(0),
           m_ownerCode(ownerCode), m_jobId(jobId) {
-        initialize_tables();
         std::cout << "Initializing tape maker for volume " << volser << std::endl;
         m_outFile.open(outputFile, std::ios::binary);
         if (!m_outFile) {
@@ -257,7 +298,7 @@ private:
     void writeVolumeLabel() {
         std::cout << "Writing VOL1 label" << std::endl;
         std::string label = createVOL1Label();
-        writeBlock(asciiToEbcdic(label), 0xA0, true);
+        writeBlock(utf8ToEbcdic(label), 0xA0, true);
     }
 
     void writeFile(FileConfig& config, int fileNumber) {
@@ -274,8 +315,8 @@ private:
         std::string hdr1 = createHDR1Label(config, fileNumber);
         std::string hdr2 = createHDR2Label(config);
 
-        writeBlock(asciiToEbcdic(hdr1), 0xA0, true);
-        writeBlock(asciiToEbcdic(hdr2), 0xA0, true);
+        writeBlock(utf8ToEbcdic(hdr1), 0xA0, true);
+        writeBlock(utf8ToEbcdic(hdr2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -312,7 +353,7 @@ private:
                     line.pop_back();
                 }
 
-                std::vector<uint8_t> ebcdicLine = asciiToEbcdic(line);
+                std::vector<uint8_t> ebcdicLine = utf8ToEbcdic(line);
                 size_t lineSize = std::min(ebcdicLine.size(), static_cast<size_t>(config.lrecl));
                 std::copy(ebcdicLine.begin(), ebcdicLine.begin() + lineSize, record.begin());
 
@@ -340,8 +381,8 @@ private:
         writeTapeMark();
         std::string eof1 = createEOF1Label(config, fileNumber);
         std::string eof2 = createEOF2Label(config);
-        writeBlock(asciiToEbcdic(eof1), 0xA0, true);
-        writeBlock(asciiToEbcdic(eof2), 0xA0, true);
+        writeBlock(utf8ToEbcdic(eof1), 0xA0, true);
+        writeBlock(utf8ToEbcdic(eof2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -372,25 +413,54 @@ private:
         m_prevBlockSize = 0;
     }
 
-    std::vector<uint8_t> asciiToEbcdic(const std::string& ascii) {
+    std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
         std::vector<uint8_t> ebcdic;
-        ebcdic.reserve(ascii.size());
-        for (char c : ascii) {
-            ebcdic.push_back(ascii_to_ebcdic_table[static_cast<unsigned char>(c)]);
-        }
-        return ebcdic;
-    }
+        ebcdic.reserve(input.size());  // Initial estimate, might need more or less
 
-    std::string ebcdicToAscii(const std::vector<uint8_t>& ebcdic) {
-        std::string ascii;
-        ascii.reserve(ebcdic.size());
-        std::cout << "EBCDIC to ASCII conversion:" << std::endl;
-        for (uint8_t c : ebcdic) {
-            char asciiChar = ebcdic_to_ascii_table[c];
-            ascii.push_back(asciiChar);
+        const uint8_t* pString = reinterpret_cast<const uint8_t*>(input.c_str());
+        while (*pString) {
+            const uint8_t* p = pString;
+            int iState = TR_CP031_START_STATE;
+
+            // Process one UTF-8 sequence
+            do {
+                unsigned char ch = *p++;
+                unsigned char iColumn = tr_cp031_itt[ch];
+                unsigned short iOffset = tr_cp031_sot[iState];
+
+                for (;;) {
+                    int y = tr_cp031_sbt[iOffset];
+                    if (y < 128) {
+                        // RUN phrase
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset += 2;
+                        }
+                    } else {
+                        // COPY phrase
+                        y = 256-y;
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+iColumn+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset = static_cast<unsigned short>(iOffset + y + 1);
+                        }
+                    }
+                }
+            } while (iState < TR_CP031_ACCEPTING_STATES_START);
+
+            // Convert state to EBCDIC value
+            ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
+
+            // Move to next UTF-8 sequence
+            pString = utf8_NextCodePoint(pString);
         }
-        std::cout << std::dec;
-        return ascii;
+
+        return ebcdic;
     }
 
     std::string padRight(const std::string& str, size_t length) {
@@ -402,44 +472,7 @@ private:
         if (str.length() >= length) return str.substr(0, length);
         return std::string(length - str.length(), '0') + str;
     }
-
-    static const unsigned char ebcdic_to_ascii_table[];
-    static unsigned char ascii_to_ebcdic_table[256];
-    static bool tables_initialized;
-
-    static void initialize_tables() {
-        if (!tables_initialized) {
-            for (int i = 0; i < 256; ++i) {
-                unsigned char ascii = ebcdic_to_ascii_table[i];
-                ascii_to_ebcdic_table[ascii] = i;
-            }
-
-            tables_initialized = true;
-        }
-    }
 };
-
-const unsigned char AwsTapeMaker::ebcdic_to_ascii_table[] = {
-    "\x00\x01\x02\x03\xA6\x09\xA7\x7F\xA9\xB0\xB1\x0B\x0C\x0D\x0E\x0F"
-    "\x10\x11\x12\x13\xB2\xB4\x08\xB7\x18\x19\x1A\xB8\xBA\x1D\xBB\x1F"
-    "\xBD\xC0\x1C\xC1\xC2\x0A\x17\x1B\xC3\xC4\xC5\xC6\xC7\x05\x06\x07"
-    "\xC8\xC9\x16\xCB\xCC\x1E\xCD\x04\xCE\xD0\xD1\xD2\x14\x15\xD3\xFC"
-    "\x20\xD4\x83\x84\x85\xA0\xD5\x86\x87\xA4\xD6\x2E\x3C\x28\x2B\xD7"
-    "\x26\x82\x88\x89\x8A\xA1\x8C\x8B\x8D\xD8\x21\x24\x2A\x29\x3B\x5E"
-    "\x2D\x2F\xD9\x8E\xDB\xDC\xDD\x8F\x80\xA5\x7C\x2C\x25\x5F\x3E\x3F"
-    "\xDE\x90\xDF\xE0\xE2\xE3\xE4\xE5\xE6\x60\x3A\x23\x40\x27\x3D\x22"
-    "\xE7\x61\x62\x63\x64\x65\x66\x67\x68\x69\xAE\xAF\xE8\xE9\xEA\xEC"
-    "\xF0\x6A\x6B\x6C\x6D\x6E\x6F\x70\x71\x72\xF1\xF2\x91\xF3\x92\xF4"
-    "\xF5\x7E\x73\x74\x75\x76\x77\x78\x79\x7A\xAD\xA8\xF6\x5B\xF7\xF8"
-    "\x9B\x9C\x9D\x9E\x9F\xB5\xB6\xAC\xAB\xB9\xAA\xB3\xBC\x5D\xBE\xBF"
-    "\x7B\x41\x42\x43\x44\x45\x46\x47\x48\x49\xCA\x93\x94\x95\xA2\xCF"
-    "\x7D\x4A\x4B\x4C\x4D\x4E\x4F\x50\x51\x52\xDA\x96\x81\x97\xA3\x98"
-    "\x5C\xE1\x53\x54\x55\x56\x57\x58\x59\x5A\xFD\xEB\x99\xED\xEE\xEF"
-    "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\xFE\xFB\x9A\xF9\xFA\xFF"
-};
-
-unsigned char AwsTapeMaker::ascii_to_ebcdic_table[256];
-bool AwsTapeMaker::tables_initialized = false;
 
 void readConfigFile(const std::string& filename, std::vector<FileConfig>& configs) {
     std::ifstream file(filename);
