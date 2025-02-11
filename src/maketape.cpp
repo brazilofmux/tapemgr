@@ -763,6 +763,63 @@ private:
     }
 };
 
+bool validateAndFixupRecordFormat(FileConfig& config) {
+    // For fixed-length records (F or FB)
+    if (config.recordFormat == 'F') {
+        // Case 1: F format - LRECL should equal BLKSIZE
+        if (config.blksize != config.lrecl) {
+            std::cout << "Warning: For file " << config.inputFile
+                      << " (F format), BLKSIZE (" << config.blksize
+                      << ") differs from LRECL (" << config.lrecl << ")" << std::endl;
+
+            if (config.blksize > config.lrecl) {
+                // If BLKSIZE is an exact multiple of LRECL, suggest FB
+                if (config.blksize % config.lrecl == 0) {
+                    std::cout << "  Suggestion: Change format to FB to block "
+                              << (config.blksize / config.lrecl)
+                              << " records per block" << std::endl;
+                    std::cout << "  Or set BLKSIZE=" << config.lrecl
+                              << " to maintain F format" << std::endl;
+                } else {
+                    std::cout << "  Setting BLKSIZE=" << config.lrecl
+                              << " to match F format requirements" << std::endl;
+                    config.blksize = config.lrecl;
+                }
+            } else {
+                std::cout << "  Setting BLKSIZE=" << config.lrecl
+                          << " to match F format requirements" << std::endl;
+                config.blksize = config.lrecl;
+            }
+        }
+    }
+
+    // Case 2: FB format - BLKSIZE must be a multiple of LRECL
+    if (config.recfm.find('B') != std::string::npos &&
+        config.recordFormat == 'F') {
+        if (config.blksize % config.lrecl != 0) {
+            std::cout << "Error: For file " << config.inputFile
+                      << " (FB format), BLKSIZE (" << config.blksize
+                      << ") must be a multiple of LRECL (" << config.lrecl
+                      << ")" << std::endl;
+
+            // Calculate nearest valid BLKSIZE
+            int recordsPerBlock = config.blksize / config.lrecl;
+            int suggestedBlockSize = config.lrecl * recordsPerBlock;
+            int nextBlockSize = config.lrecl * (recordsPerBlock + 1);
+
+            std::cout << "  Suggestions:" << std::endl;
+            std::cout << "  - BLKSIZE=" << suggestedBlockSize
+                      << " (" << recordsPerBlock << " records per block)" << std::endl;
+            std::cout << "  - BLKSIZE=" << nextBlockSize
+                      << " (" << (recordsPerBlock + 1) << " records per block)" << std::endl;
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void readConfigFile(const std::string& filename, std::vector<FileConfig>& configs) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -786,21 +843,6 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
             config.blockAttribute = (config.blockAttribute == 'B') ? 'R' : 'S';  // Spanned or Blocked and Spanned
         }
 
-        // Warnings and fixups.
-        if (config.recfm[0] == 'F') {
-            if (config.blksize > config.lrecl) {
-                if (config.recfm == "F") {
-                    std::cout << "Warning: BLKSIZE > LRECL for file " << config.inputFile
-                              << ". Changing RECFM from 'F' to 'FB'." << std::endl;
-                    config.recfm = "FB";
-                }
-                config.blockAttribute = 'B';
-            } else if (config.blksize == config.lrecl && config.recfm == "FB") {
-                std::cout << "Note: BLKSIZE == LRECL for file " << config.inputFile
-                          << ". 'FB' is accepted but 'F' would be more typical." << std::endl;
-            }
-        }
-
         config.binary = false;  // Default to text mode
 
         std::string token;
@@ -809,6 +851,12 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
         }
 
         configs.push_back(config);
+    }
+
+    for (auto& config : configs) {
+        if (!validateAndFixupRecordFormat(config)) {
+            throw std::runtime_error("Invalid record format configuration");
+        }
     }
 }
 
