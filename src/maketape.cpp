@@ -172,6 +172,8 @@ public:
         }
     }
 
+    size_t getRecordCount() const { return m_recordCount; }
+
     std::vector<std::vector<uint8_t>> addRecord(const std::vector<uint8_t>& record) {
         std::vector<std::vector<uint8_t>> completeBlocks;
 
@@ -216,13 +218,12 @@ private:
     VerbosityLevel m_verbosity;
     std::vector<uint8_t> m_currentBlock;
     size_t m_currentBlockOffset;
-    int m_recordCount = 0;
+    size_t m_recordCount = 0;
 
     void initializeNewBlock() {
         m_currentBlock.clear();
         m_currentBlock.resize(m_config.blksize, 0x40);
         m_currentBlockOffset = 4;
-        m_recordCount = 0;
 
         if (m_verbosity >= VerbosityLevel::Debug) {
             std::cout << "Initialized new block with size: " << m_config.blksize << std::endl;
@@ -239,6 +240,9 @@ private:
 
     std::vector<std::vector<uint8_t>> addVSRecord(const std::vector<uint8_t>& record) {
         std::vector<std::vector<uint8_t>> completeBlocks;
+
+        m_recordCount++;
+
         size_t remainingData = record.size();
         size_t dataOffset = 0;
         bool isFirstSegment = true;
@@ -663,7 +667,11 @@ private:
             writeBlock(finalBlock, 0xA0);
             m_blockCount++;
         }
+
+        // Store the actual record count
+        config.recordCount = blockBuilder.getRecordCount();
     }
+
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
         std::cout << "  Writing EOF1 and EOF2 labels" << std::endl;
