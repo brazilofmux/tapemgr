@@ -357,14 +357,23 @@ private:
                       << std::endl;
         }
 
-        // Safety check
-        if (m_currentBlockOffset + record.size() > m_config.blksize) {
+        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
+
+        // For unblocked (F), finish any existing block before starting new record
+        if (!isBlocked && m_currentBlockOffset > 0) {
             finishCurrentBlock();
             completeBlocks.push_back(m_currentBlock);
             initializeNewBlock();
         }
 
-        // For fixed records, just copy the data
+        // For blocked (FB), only start new block if record won't fit
+        if (isBlocked && m_currentBlockOffset + record.size() > m_config.blksize) {
+            finishCurrentBlock();
+            completeBlocks.push_back(m_currentBlock);
+            initializeNewBlock();
+        }
+
+        // Core logic remains the same - copy record into current block
         if (record.size() > 0) {
             std::copy(record.begin(), record.end(),
                      m_currentBlock.begin() + m_currentBlockOffset);
@@ -373,8 +382,14 @@ private:
         m_currentBlockOffset += record.size();
         m_recordCount++;
 
-        // If block is full, finish it
-        if (m_currentBlockOffset == m_config.blksize) {
+        // For unblocked (F), always finish block after record
+        if (!isBlocked) {
+            finishCurrentBlock();
+            completeBlocks.push_back(m_currentBlock);
+            initializeNewBlock();
+        }
+        // For blocked (FB), only finish block if full
+        else if (m_currentBlockOffset == m_config.blksize) {
             finishCurrentBlock();
             completeBlocks.push_back(m_currentBlock);
             initializeNewBlock();
