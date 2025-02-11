@@ -143,6 +143,128 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
     return jcl.str();
 }
 
+class RecordBlockBuilder {
+public:
+    RecordBlockBuilder(const FileConfig& config)
+        : m_config(config) {
+        initializeNewBlock();
+    }
+
+    // Process a single record and return complete blocks
+    std::vector<std::vector<uint8_t>> addRecord(const std::vector<uint8_t>& record) {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+
+        // Handle different record formats
+        switch(m_config.recordFormat) {
+            case 'V':
+                return addVariableRecord(record);
+            case 'F':
+                return addFixedRecord(record);
+            default:
+                throw std::runtime_error("Unsupported record format: " + std::string(1, m_config.recordFormat));
+        }
+
+        return completeBlocks;
+    }
+
+    // Flush any remaining data and return final block
+    std::vector<uint8_t> flush() {
+        if (m_currentBlockOffset > 4) {  // If we have any data beyond BDW
+            finishCurrentBlock();
+            std::vector<uint8_t> finalBlock = m_currentBlock;
+            initializeNewBlock();
+            return finalBlock;
+        }
+        return std::vector<uint8_t>();
+    }
+
+private:
+    const FileConfig& m_config;
+    std::vector<uint8_t> m_currentBlock;
+    size_t m_currentBlockOffset;
+
+    void initializeNewBlock() {
+        m_currentBlock.clear();
+        m_currentBlock.resize(m_config.blksize, 0x40);  // Initialize with EBCDIC space
+        m_currentBlockOffset = 4;  // Start after BDW
+    }
+
+    std::vector<std::vector<uint8_t>> addVariableRecord(const std::vector<uint8_t>& record) {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+
+        // Calculate record length including RDW
+        uint16_t recordLength = record.size() + 4;
+
+        // Check if we need a new block
+        if (m_currentBlockOffset + recordLength > m_config.blksize) {
+            finishCurrentBlock();
+            completeBlocks.push_back(m_currentBlock);
+            initializeNewBlock();
+        }
+
+        // Safety check
+        if (m_currentBlockOffset + recordLength > m_config.blksize) {
+            throw std::runtime_error("Record too large for block size");
+        }
+
+        // Add RDW
+        m_currentBlock[m_currentBlockOffset] = recordLength >> 8;     // Length high byte
+        m_currentBlock[m_currentBlockOffset + 1] = recordLength;      // Length low byte
+        m_currentBlock[m_currentBlockOffset + 2] = 0;                 // Flags
+        m_currentBlock[m_currentBlockOffset + 3] = 0;                 // Reserved
+
+        // Add record data
+        if (record.size() > 0) {
+            std::copy(record.begin(), record.end(),
+                     m_currentBlock.begin() + m_currentBlockOffset + 4);
+        }
+
+        m_currentBlockOffset += recordLength;
+
+        return completeBlocks;
+    }
+
+    std::vector<std::vector<uint8_t>> addFixedRecord(const std::vector<uint8_t>& record) {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+
+        // Safety check
+        if (m_currentBlockOffset + record.size() > m_config.blksize) {
+            finishCurrentBlock();
+            completeBlocks.push_back(m_currentBlock);
+            initializeNewBlock();
+        }
+
+        // For fixed records, just copy the data
+        if (record.size() > 0) {
+            std::copy(record.begin(), record.end(),
+                     m_currentBlock.begin() + m_currentBlockOffset);
+        }
+
+        m_currentBlockOffset += record.size();
+
+        // If block is full, finish it
+        if (m_currentBlockOffset == m_config.blksize) {
+            finishCurrentBlock();
+            completeBlocks.push_back(m_currentBlock);
+            initializeNewBlock();
+        }
+
+        return completeBlocks;
+    }
+
+    void finishCurrentBlock() {
+        // Set BDW
+        uint16_t blockLength = m_currentBlockOffset;
+        m_currentBlock[0] = blockLength >> 8;    // Length high byte
+        m_currentBlock[1] = blockLength;         // Length low byte
+        m_currentBlock[2] = 0;                   // Flags
+        m_currentBlock[3] = 0;                   // Reserved
+
+        // Ensure block is properly sized
+        m_currentBlock.resize(m_currentBlockOffset);
+    }
+};
+
 class AwsTapeMaker {
 public:
     AwsTapeMaker(const std::string& volser, const std::string& outputFile,
@@ -330,27 +452,16 @@ private:
     void writeDataBlocks(FileConfig& config) {
         std::cout << "  Writing data blocks" << std::endl;
         std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
-        std::vector<uint8_t> block(config.blksize, 0x40);  // Initialize with EBCDIC space
+        RecordBlockBuilder blockBuilder(config);
         std::vector<uint8_t> record(config.lrecl);
-        size_t blockOffset = 0;
 
-        auto writeCurrentBlock = [&]() {
-            if (blockOffset > 0) {
-                writeBlock(std::vector<uint8_t>(block.begin(), block.begin() + blockOffset), 0xA0);
-                m_blockCount++;
-                blockOffset = 0;
-            }
-        };
-
-        size_t recordCount = 0;
         if (config.binary) {
             while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
-                std::copy(record.begin(), record.end(), block.begin() + blockOffset);
-                blockOffset += config.lrecl;
-                if (blockOffset == config.blksize) {
-                    writeCurrentBlock();
+                auto completeBlocks = blockBuilder.addRecord(record);
+                for (const auto& block : completeBlocks) {
+                    writeBlock(block, 0xA0);
+                    m_blockCount++;
                 }
-                recordCount++;
             }
         } else {
             std::string line;
@@ -359,28 +470,26 @@ private:
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
+                auto ebcdicData = utf8ToEbcdic(line);
+                record.assign(config.lrecl, 0x40);  // Fill with EBCDIC spaces
+                std::copy(ebcdicData.begin(),
+                         ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
+                         record.begin());
 
-                std::vector<uint8_t> ebcdicLine = utf8ToEbcdic(line);
-                size_t lineSize = std::min(ebcdicLine.size(), static_cast<size_t>(config.lrecl));
-                std::copy(ebcdicLine.begin(), ebcdicLine.begin() + lineSize, record.begin());
-
-                // Pad with EBCDIC spaces if necessary
-                if (lineSize < static_cast<size_t>(config.lrecl)) {
-                    std::fill(record.begin() + lineSize, record.end(), 0x40);
+                auto completeBlocks = blockBuilder.addRecord(record);
+                for (const auto& block : completeBlocks) {
+                    writeBlock(block, 0xA0);
+                    m_blockCount++;
                 }
-
-                std::copy(record.begin(), record.end(), block.begin() + blockOffset);
-                blockOffset += config.lrecl;
-                if (blockOffset == config.blksize) {
-                    writeCurrentBlock();
-                }
-                recordCount++;
             }
         }
 
-        // Write any remaining partial block
-        writeCurrentBlock();
-        config.recordCount = recordCount;
+        // Handle any remaining partial block
+        auto finalBlock = blockBuilder.flush();
+        if (!finalBlock.empty()) {
+            writeBlock(finalBlock, 0xA0);
+            m_blockCount++;
+        }
     }
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
