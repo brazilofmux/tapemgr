@@ -112,29 +112,105 @@ struct BlockDescriptorWord {
     }
 };
 
-struct RecordDescriptorWord {
-    unsigned char length_high;
-    unsigned char length_low;
-    unsigned char reserved_high;
-    unsigned char reserved_low;
-
-    uint16_t getLength() const {
-        return (length_high << 8) | length_low;
-    }
-
-    uint16_t getReserved() const {
-        return (reserved_high << 8) | reserved_low;
-    }
+// SDW/RDW structure definitions
+struct RecordDescriptor {
+    uint8_t length_hi;   // High byte of length
+    uint8_t length_lo;   // Low byte of length
+    uint8_t flags;       // Flags including segment control bits
+    uint8_t reserved;    // Reserved field
 };
 
-struct SegmentDescriptorWord {
-    unsigned char length_high;
-    unsigned char length_low;
-    unsigned char reserved;
-    unsigned char flags;
+// Segment control codes (in rightmost 2 bits of flags byte)
+enum class SegmentCode {
+    CompleteRecord = 0b00,  // Complete logical record
+    FirstSegment   = 0b01,  // First segment of multi-segment record
+    LastSegment    = 0b10,  // Last segment of multi-segment record
+    MiddleSegment  = 0b11   // Middle segment of multi-segment record
+};
 
-    uint16_t getLength() const {
-        return (length_high << 8) | length_low;
+class SpannedRecordAnalyzer {
+public:
+    static void analyzeBlock(const std::vector<uint8_t>& buffer, size_t blockSize, VerbosityLevel verbosity) {
+        if (verbosity < VerbosityLevel::Detailed) return;
+
+        if (blockSize < 4) return;  // Need at least BDW size
+
+        // First word is the Block Descriptor Word (BDW)
+        const RecordDescriptor* bdw = reinterpret_cast<const RecordDescriptor*>(buffer.data());
+        uint16_t totalLength = (bdw->length_hi << 8) | bdw->length_lo;
+
+        std::cout << "Block Structure Analysis:" << std::endl;
+        std::cout << "  BDW:" << std::endl;
+        std::cout << "    Total Length: " << totalLength << " bytes (0x"
+                  << std::hex << std::setw(4) << std::setfill('0') << totalLength
+                  << ")" << std::dec << std::endl;
+
+        // Process each record/segment in the block
+        size_t offset = 4;  // Start after BDW
+        int recordNum = 1;
+
+        while (offset < blockSize) {
+            const RecordDescriptor* descriptor = reinterpret_cast<const RecordDescriptor*>(buffer.data() + offset);
+            uint16_t length = (descriptor->length_hi << 8) | descriptor->length_lo;
+
+            // Get segment control code from rightmost 2 bits
+            SegmentCode segCode = static_cast<SegmentCode>(descriptor->flags & 0x03);
+
+            // Check if this is an SDW (any non-zero bits in reserved or flags besides segment code)
+            bool isSDW = (descriptor->reserved != 0) || (descriptor->flags & 0xFC);
+
+            if (isSDW) {
+                std::cout << "  Segment #" << recordNum << ":" << std::endl;
+                std::cout << "    SDW:" << std::endl;
+                printDescriptorInfo(descriptor, segCode);
+            } else {
+                std::cout << "  Record #" << recordNum << ":" << std::endl;
+                std::cout << "    RDW:" << std::endl;
+                printDescriptorInfo(descriptor, segCode);
+            }
+
+            offset += length;
+            recordNum++;
+        }
+    }
+
+private:
+    static void printDescriptorInfo(const RecordDescriptor* desc, SegmentCode segCode) {
+        uint16_t length = (desc->length_hi << 8) | desc->length_lo;
+        std::cout << "      Length: " << length << " bytes (0x"
+                  << std::hex << std::setw(4) << std::setfill('0') << length
+                  << ")" << std::dec << std::endl;
+
+        if (desc->flags || desc->reserved) {
+            std::cout << "      Segment Type: ";
+            switch (segCode) {
+                case SegmentCode::CompleteRecord:
+                    std::cout << "Complete Record";
+                    break;
+                case SegmentCode::FirstSegment:
+                    std::cout << "First Segment";
+                    break;
+                case SegmentCode::LastSegment:
+                    std::cout << "Last Segment";
+                    break;
+                case SegmentCode::MiddleSegment:
+                    std::cout << "Middle Segment";
+                    break;
+            }
+            std::cout << std::endl;
+
+            if (desc->flags & 0xFC) {
+                std::cout << "      Additional Flags: 0x"
+                          << std::hex << std::setw(2) << static_cast<int>(desc->flags & 0xFC)
+                          << std::dec << std::endl;
+            }
+
+            if (desc->reserved) {
+                std::cout << "      Reserved: 0x"
+                          << std::hex << std::setw(2) << static_cast<int>(desc->reserved)
+                          << std::dec << std::endl;
+            }
+        }
     }
 };
 
@@ -388,154 +464,6 @@ bool validateHDR2Label(const HDR2Label& label) {
     return isValid;
 }
 
-void parseVariableFormatBlock(const std::vector<uint8_t>& buffer, size_t dataSize, VerbosityLevel verbosity) {
-    if (dataSize < 4) {
-        std::cout << "Warning: Block too small to contain BDW" << std::endl;
-        return;
-    }
-
-    const BlockDescriptorWord* bdw = reinterpret_cast<const BlockDescriptorWord*>(buffer.data());
-    uint16_t blockLength = bdw->getLength();
-
-    std::cout << "\nBlock Structure Analysis:" << std::endl;
-    std::cout << "  BDW:" << std::endl;
-    std::cout << "    Total Length: " << blockLength << " bytes (0x"
-              << std::hex << std::setw(4) << std::setfill('0') << blockLength
-              << std::dec << ")" << std::endl;
-
-    uint16_t reserved = bdw->getReserved();
-    if (reserved != 0) {
-        std::cout << "    Reserved: 0x" << std::hex << reserved
-                  << " (non-zero reserved field)" << std::dec << std::endl;
-    }
-
-    // Process each record in the block
-    size_t offset = sizeof(BlockDescriptorWord);
-    int recordNumber = 1;
-
-    while (offset < blockLength) {  // Changed from dataSize to blockLength
-        if (offset + sizeof(RecordDescriptorWord) > dataSize) {
-            std::cout << "Warning: Insufficient data for RDW at offset " << offset << std::endl;
-            break;
-        }
-
-        const RecordDescriptorWord* rdw = reinterpret_cast<const RecordDescriptorWord*>(buffer.data() + offset);
-        uint16_t recordLength = rdw->getLength();
-
-        std::cout << "  Record #" << recordNumber << ":" << std::endl;
-        std::cout << "    RDW:" << std::endl;
-        std::cout << "      Length: " << recordLength << " bytes (0x"
-                  << std::hex << std::setw(4) << std::setfill('0') << recordLength
-                  << std::dec << ")" << std::endl;
-
-        uint16_t rdwReserved = rdw->getReserved();
-        if (rdwReserved != 0) {
-            std::cout << "      Reserved: 0x" << std::hex << rdwReserved
-                      << " (non-zero reserved field)" << std::dec << std::endl;
-        }
-
-        // Print record data
-        if (verbosity >= VerbosityLevel::Debug) {
-            std::cout << "    Data:" << std::endl;
-            std::cout << "      Hex: ";
-            for (size_t i = offset + sizeof(RecordDescriptorWord);
-                 i < offset + recordLength && i < dataSize; ++i) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0')
-                         << static_cast<int>(buffer[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-
-            std::cout << "      EBCDIC: ";
-            std::string ebcdicStr;
-            for (size_t i = offset + sizeof(RecordDescriptorWord);
-                 i < offset + recordLength && i < dataSize; ++i) {
-                std::cout << ebcdicToAsciiTable[buffer[i]];
-            }
-            std::cout << std::endl;
-        }
-
-        offset += recordLength;
-        recordNumber++;
-    }
-}
-
-void parseSpannedFormatBlock(const std::vector<uint8_t>& buffer, size_t dataSize, VerbosityLevel verbosity) {
-    if (dataSize < 4) {
-        std::cout << "Warning: Block too small to contain BDW" << std::endl;
-        return;
-    }
-
-    const BlockDescriptorWord* bdw = reinterpret_cast<const BlockDescriptorWord*>(buffer.data());
-    uint16_t blockLength = bdw->getLength();
-
-    std::cout << "\nSpanned Block Structure Analysis:" << std::endl;
-    std::cout << "  BDW:" << std::endl;
-    std::cout << "    Total Length: " << blockLength << " bytes (0x"
-              << std::hex << std::setw(4) << std::setfill('0') << blockLength
-              << std::dec << ")" << std::endl;
-
-    uint16_t reserved = bdw->getReserved();
-    if (reserved != 0) {
-        std::cout << "    Reserved: 0x" << std::hex << reserved
-                  << " (non-zero reserved field)" << std::dec << std::endl;
-    }
-
-    // Process each segment in the block
-    size_t offset = sizeof(BlockDescriptorWord);
-    int segmentNumber = 1;
-
-    while (offset < blockLength) {  // Use blockLength instead of dataSize
-        if (offset + sizeof(SegmentDescriptorWord) > dataSize) {
-            std::cout << "Warning: Insufficient data for SDW at offset " << offset << std::endl;
-            break;
-        }
-
-        const SegmentDescriptorWord* sdw = reinterpret_cast<const SegmentDescriptorWord*>(buffer.data() + offset);
-        uint16_t segmentLength = sdw->getLength();
-
-        std::cout << "  Segment #" << segmentNumber << ":" << std::endl;
-        std::cout << "    SDW:" << std::endl;
-        std::cout << "      Length: " << segmentLength << " bytes (0x"
-                  << std::hex << std::setw(4) << std::setfill('0') << segmentLength
-                  << std::dec << ")" << std::endl;
-        std::cout << "      Flags: 0x" << std::hex << static_cast<int>(sdw->flags) << std::dec;
-
-        // Decode segment flags
-        if (sdw->flags & 0x80) std::cout << " (First segment)";
-        if (sdw->flags & 0x40) std::cout << " (Last segment)";
-        if (sdw->flags & 0x20) std::cout << " (Complete logical record)";
-        std::cout << std::endl;
-
-        // Print segment data if in debug mode
-        if (verbosity >= VerbosityLevel::Debug) {
-            std::cout << "    Data:" << std::endl;
-            std::cout << "      Hex: ";
-            for (size_t i = offset + sizeof(SegmentDescriptorWord);
-                 i < offset + segmentLength && i < dataSize; ++i) {
-                std::cout << std::hex << std::setw(2) << std::setfill('0')
-                         << static_cast<int>(buffer[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-
-            std::cout << "      EBCDIC: ";
-            for (size_t i = offset + sizeof(SegmentDescriptorWord);
-                 i < offset + segmentLength && i < dataSize; ++i) {
-                std::cout << ebcdicToAsciiTable[buffer[i]];
-            }
-            std::cout << std::endl;
-        }
-
-        offset += segmentLength;
-        segmentNumber++;
-
-        // Optional: Add validation that we don't exceed block length
-        if (offset > blockLength) {
-            std::cout << "Warning: Segment extends beyond block length" << std::endl;
-            break;
-        }
-    }
-}
-
 void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
     std::ifstream file(inputFile, std::ios::binary);
     if (!file) {
@@ -554,7 +482,6 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
     uint8_t prevFlags = 0;
     unsigned int auditBLKCOUNT = 0;
     std::string labelFileName, labelFileNumber;
-    char labelRECFM = ' ';
     unsigned int labelBLKSIZE = 0, labelLRECL = 0, labelBLKCOUNT = 0;
     int fileNo = 0;
     uint64_t fileBytes = 0;
@@ -619,7 +546,6 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                 const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
                 if (validateHDR2Label(*hdr2)) {
                     processHDR2Label(*hdr2, verbosity);
-                    labelRECFM = hdr2->recordFormat;
                 } else {
                     std::cout << "HDR2 label validation failed" << std::endl;
                 }
@@ -633,18 +559,14 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                 // Data block
                 if (verbosity >= VerbosityLevel::Detailed) {
                     std::cout << "Data block: " << dataSize << " bytes" << std::endl;
+                    SpannedRecordAnalyzer::analyzeBlock(buffer, dataSize, verbosity);
                     if (verbosity >= VerbosityLevel::Debug) {
                         std::cout << "First 32 bytes: ";
                         for (size_t i = 0; i < std::min<size_t>(32, dataSize); ++i) {
-                            std::cout << std::setw(2) << std::setfill('0') << std::hex << static_cast<int>(buffer[i]) << " ";
+                            std::cout << std::setw(2) << std::setfill('0') << std::hex
+                                     << static_cast<int>(buffer[i]) << " ";
                         }
                         std::cout << std::dec << std::endl;
-                    }
-                    uint8_t recfm = ebcdicToAsciiTable[static_cast<unsigned char>(labelRECFM)];
-                    if (recfm == 'V' || recfm == 'D') {
-                        parseVariableFormatBlock(buffer, dataSize, verbosity);
-                    } else if (recfm == 'S') {
-                        parseSpannedFormatBlock(buffer, dataSize, verbosity);
                     }
                 }
             }
