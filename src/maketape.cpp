@@ -223,10 +223,14 @@ private:
     void initializeNewBlock() {
         m_currentBlock.clear();
         m_currentBlock.resize(m_config.blksize, 0x40);
-        m_currentBlockOffset = 4;
+        // Only start after BDW for variable formats
+        m_currentBlockOffset = (m_config.recordFormat == 'V') ? 4 : 0;
 
         if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Initialized new block with size: " << m_config.blksize << std::endl;
+            std::cout << "Initialized new block:"
+                      << "\n  Size: " << m_config.blksize
+                      << "\n  Starting offset: " << m_currentBlockOffset
+                      << std::endl;
         }
     }
 
@@ -435,16 +439,21 @@ private:
     }
 
     void finishCurrentBlock() {
-        uint16_t blockLength = m_currentBlockOffset;
-        m_currentBlock[0] = blockLength >> 8;
-        m_currentBlock[1] = blockLength;
-        m_currentBlock[2] = 0;
-        m_currentBlock[3] = 0;
+        if (m_config.recordFormat == 'V') {
+            // Only write BDW for variable formats
+            uint16_t blockLength = m_currentBlockOffset;
+            m_currentBlock[0] = blockLength >> 8;    // Length high byte
+            m_currentBlock[1] = blockLength;         // Length low byte
+            m_currentBlock[2] = 0;                   // Flags
+            m_currentBlock[3] = 0;                   // Reserved
+        }
+
+        // For fixed formats, we've already written the exact block size worth of data
         m_currentBlock.resize(m_currentBlockOffset);
 
         if (m_verbosity >= VerbosityLevel::Debug) {
             std::cout << "Finishing block:"
-                      << "\n  Final length: " << blockLength
+                      << "\n  Final length: " << m_currentBlockOffset
                       << "\n  Records in block: " << m_recordCount
                       << std::endl;
         }
