@@ -1,15 +1,30 @@
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <cstring>
-#include <cstdint>
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
 #include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <getopt.h>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "utf8tables.h"
+
+enum class VerbosityLevel {
+    Summary,
+    Normal,
+    Detailed,
+    Debug
+};
+
+struct ProgramOptions {
+    VerbosityLevel verbosity = VerbosityLevel::Normal;
+    std::string volser;
+    std::string outputFile;
+    std::string configFile;
+};
 
 struct FileConfig {
     std::string inputFile;
@@ -145,31 +160,43 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
 
 class RecordBlockBuilder {
 public:
-    RecordBlockBuilder(const FileConfig& config)
-        : m_config(config) {
+    RecordBlockBuilder(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_verbosity(verbosity) {
         initializeNewBlock();
+        if (m_verbosity >= VerbosityLevel::Detailed) {
+            std::cout << "Initializing RecordBlockBuilder with:"
+                      << "\n  Record Format: " << m_config.recordFormat
+                      << "\n  Block Size: " << m_config.blksize
+                      << "\n  Record Length: " << m_config.lrecl
+                      << std::endl;
+        }
     }
 
-    // Process a single record and return complete blocks
     std::vector<std::vector<uint8_t>> addRecord(const std::vector<uint8_t>& record) {
         std::vector<std::vector<uint8_t>> completeBlocks;
 
-        // Handle different record formats
         switch(m_config.recordFormat) {
             case 'V':
-                return addVariableRecord(record);
+                return addVariableRecord(record, false); // Not blocked
             case 'F':
                 return addFixedRecord(record);
             default:
-                throw std::runtime_error("Unsupported record format: " + std::string(1, m_config.recordFormat));
+                if (m_config.recfm.find('B') != std::string::npos) {
+                    if (m_config.recordFormat == 'V') {
+                        return addVariableRecord(record, true); // Blocked
+                    }
+                }
+                throw std::runtime_error("Unsupported record format: " + m_config.recfm);
         }
 
         return completeBlocks;
     }
 
-    // Flush any remaining data and return final block
     std::vector<uint8_t> flush() {
         if (m_currentBlockOffset > 4) {  // If we have any data beyond BDW
+            if (m_verbosity >= VerbosityLevel::Debug) {
+                std::cout << "Flushing final block of size: " << m_currentBlockOffset << std::endl;
+            }
             finishCurrentBlock();
             std::vector<uint8_t> finalBlock = m_currentBlock;
             initializeNewBlock();
@@ -180,26 +207,43 @@ public:
 
 private:
     const FileConfig& m_config;
+    VerbosityLevel m_verbosity;
     std::vector<uint8_t> m_currentBlock;
     size_t m_currentBlockOffset;
+    int m_recordCount = 0;  // For logging
 
     void initializeNewBlock() {
         m_currentBlock.clear();
         m_currentBlock.resize(m_config.blksize, 0x40);  // Initialize with EBCDIC space
         m_currentBlockOffset = 4;  // Start after BDW
+        m_recordCount = 0;
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Initialized new block with size: " << m_config.blksize << std::endl;
+        }
     }
 
-    std::vector<std::vector<uint8_t>> addVariableRecord(const std::vector<uint8_t>& record) {
+    std::vector<std::vector<uint8_t>> addVariableRecord(const std::vector<uint8_t>& record, bool blocked) {
         std::vector<std::vector<uint8_t>> completeBlocks;
 
         // Calculate record length including RDW
         uint16_t recordLength = record.size() + 4;
 
-        // Check if we need a new block
-        if (m_currentBlockOffset + recordLength > m_config.blksize) {
-            finishCurrentBlock();
-            completeBlocks.push_back(m_currentBlock);
-            initializeNewBlock();
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Processing " << (blocked ? "VB" : "V") << " record:"
+                      << "\n  Record length (with RDW): " << recordLength
+                      << "\n  Current block offset: " << m_currentBlockOffset
+                      << "\n  Space remaining: " << (m_config.blksize - m_currentBlockOffset)
+                      << std::endl;
+        }
+
+        // For non-blocked format or if record won't fit in current block
+        if (!blocked || (m_currentBlockOffset + recordLength > m_config.blksize)) {
+            if (m_currentBlockOffset > 4) {  // If we have data in the current block
+                finishCurrentBlock();
+                completeBlocks.push_back(m_currentBlock);
+                initializeNewBlock();
+            }
         }
 
         // Safety check
@@ -220,12 +264,26 @@ private:
         }
 
         m_currentBlockOffset += recordLength;
+        m_recordCount++;
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Added record #" << m_recordCount << " to block"
+                      << "\n  New block offset: " << m_currentBlockOffset
+                      << std::endl;
+        }
 
         return completeBlocks;
     }
 
     std::vector<std::vector<uint8_t>> addFixedRecord(const std::vector<uint8_t>& record) {
         std::vector<std::vector<uint8_t>> completeBlocks;
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Processing fixed record:"
+                      << "\n  Record length: " << record.size()
+                      << "\n  Current block offset: " << m_currentBlockOffset
+                      << std::endl;
+        }
 
         // Safety check
         if (m_currentBlockOffset + record.size() > m_config.blksize) {
@@ -241,12 +299,19 @@ private:
         }
 
         m_currentBlockOffset += record.size();
+        m_recordCount++;
 
         // If block is full, finish it
         if (m_currentBlockOffset == m_config.blksize) {
             finishCurrentBlock();
             completeBlocks.push_back(m_currentBlock);
             initializeNewBlock();
+        }
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Added fixed record #" << m_recordCount << " to block"
+                      << "\n  New block offset: " << m_currentBlockOffset
+                      << std::endl;
         }
 
         return completeBlocks;
@@ -262,6 +327,13 @@ private:
 
         // Ensure block is properly sized
         m_currentBlock.resize(m_currentBlockOffset);
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Finishing block:"
+                      << "\n  Final length: " << blockLength
+                      << "\n  Records in block: " << m_recordCount
+                      << std::endl;
+        }
     }
 };
 
@@ -269,11 +341,15 @@ class AwsTapeMaker {
 public:
     AwsTapeMaker(const std::string& volser, const std::string& outputFile,
                  const std::string ownerCode = "TAPEOWNER",
-                 const std::string jobId = "MAJESTY/MAKETAPE")
+                 const std::string jobId = "MAJESTY/MAKETAPE",
+                 VerbosityLevel verbosity = VerbosityLevel::Normal)
         : m_volser(volser), m_outputFile(outputFile),
           m_prevBlockSize(0), m_blockCount(0),
-          m_ownerCode(ownerCode), m_jobId(jobId) {
-        std::cout << "Initializing tape maker for volume " << volser << std::endl;
+          m_ownerCode(ownerCode), m_jobId(jobId),
+          m_verbosity(verbosity) {
+        if (m_verbosity >= VerbosityLevel::Normal) {
+            std::cout << "Initializing tape maker for volume " << volser << std::endl;
+        }
         m_outFile.open(outputFile, std::ios::binary);
         if (!m_outFile) {
             throw std::runtime_error("Unable to open output file: " + outputFile);
@@ -334,6 +410,7 @@ public:
     }
 
 private:
+    VerbosityLevel m_verbosity;
     std::string m_volser;
     std::string m_outputFile;
     std::vector<FileConfig> m_files;
@@ -450,9 +527,11 @@ private:
     }
 
     void writeDataBlocks(FileConfig& config) {
-        std::cout << "  Writing data blocks" << std::endl;
+        if (m_verbosity >= VerbosityLevel::Normal) {
+            std::cout << "  Writing data blocks" << std::endl;
+        }
         std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
-        RecordBlockBuilder blockBuilder(config);
+        RecordBlockBuilder blockBuilder(config, m_verbosity);
         std::vector<uint8_t> record(config.lrecl);
 
         if (config.binary) {
@@ -649,27 +728,62 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
     }
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <volser> <output_file> <config_file>" << std::endl;
-        return 1;
+void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
+    static struct option long_options[] = {
+        {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    int option_index = 0;
+
+    while ((opt = getopt_long(argc, argv, "vh", long_options, &option_index)) != -1) {
+        switch (opt) {
+            case 'v':
+                if (options.verbosity < VerbosityLevel::Debug) {
+                    options.verbosity = static_cast<VerbosityLevel>(static_cast<int>(options.verbosity) + 1);
+                }
+                break;
+            case 'h':
+                std::cout << "Usage: " << argv[0] << " [-v] [-vv] [-vvv] [--verbose] [--help] volser output_file config_file" << std::endl;
+                std::cout << "  -v, --verbose  Increase verbosity (can be used multiple times)" << std::endl;
+                std::cout << "  -h, --help     Display this help message" << std::endl;
+                exit(0);
+            default:
+                std::cerr << "Unknown option. Use --help for usage information." << std::endl;
+                exit(1);
+        }
     }
 
+    // Need exactly 3 non-option arguments
+    if (argc - optind != 3) {
+        std::cerr << "Error: Need volser, output file, and config file arguments" << std::endl;
+        std::cerr << "Use --help for usage information." << std::endl;
+        exit(1);
+    }
+
+    options.volser = argv[optind];
+    options.outputFile = argv[optind + 1];
+    options.configFile = argv[optind + 2];
+}
+
+// Modified main function
+int main(int argc, char* argv[]) {
     try {
-        std::string volser = argv[1];
-        std::string outputFile = argv[2];
-        std::string configFile = argv[3];
+        ProgramOptions options;
+        parseCommandLine(argc, argv, options);
 
         std::vector<FileConfig> configs;
-        readConfigFile(configFile, configs);
+        readConfigFile(options.configFile, configs);
 
-        AwsTapeMaker tapeMaker(volser, outputFile);
+        AwsTapeMaker tapeMaker(options.volser, options.outputFile, "TAPEOWNER", "MAJESTY/MAKETAPE", options.verbosity);
         for (const auto& config : configs) {
             tapeMaker.addFile(config);
         }
         tapeMaker.writeTape();
 
-        std::cout << "AWS tape file created successfully: " << outputFile << std::endl;
+        std::cout << "AWS tape file created successfully: " << options.outputFile << std::endl;
 
         return 0;
     } catch (const std::exception& e) {
