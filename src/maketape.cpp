@@ -449,9 +449,19 @@ public:
         }
         testFile.close();
 
-        // Verify LRECL and BLKSIZE
-        if (config.lrecl == 0 || config.blksize == 0 || config.blksize % config.lrecl != 0) {
-            throw std::runtime_error("Invalid LRECL or BLKSIZE for file: " + config.inputFile);
+        // Basic validation - no zero lengths
+        if (config.lrecl == 0 || config.blksize == 0) {
+            throw std::runtime_error("LRECL and BLKSIZE must be non-zero for file: " + config.inputFile);
+        }
+
+        // Format-specific validation
+        if (config.recordFormat == 'F') {
+            if (config.recfm.find('B') != std::string::npos) {
+                // FB - BLKSIZE must be multiple of LRECL
+                if (config.blksize % config.lrecl != 0) {
+                    throw std::runtime_error("For FB format, BLKSIZE must be multiple of LRECL for file: " + config.inputFile);
+                }
+            }
         }
 
         // Verify RECFM
