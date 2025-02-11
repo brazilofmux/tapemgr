@@ -647,11 +647,27 @@ private:
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
+
+                // Trim trailing spaces for variable records
+                if (config.recordFormat == 'V') {
+                    while (!line.empty() && std::isspace(line.back())) {
+                        line.pop_back();
+                    }
+                }
+
                 auto ebcdicData = utf8ToEbcdic(line);
-                record.assign(config.lrecl, 0x40);  // Fill with EBCDIC spaces
-                std::copy(ebcdicData.begin(),
-                         ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
-                         record.begin());
+
+                // For variable records, use actual length
+                // For fixed records, pad to LRECL
+                std::vector<uint8_t> record;
+                if (config.recordFormat == 'V') {
+                    record = ebcdicData;  // Use exact length
+                } else {
+                    record.assign(config.lrecl, 0x40);  // Pad fixed records
+                    std::copy(ebcdicData.begin(),
+                             ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
+                             record.begin());
+                }
 
                 auto completeBlocks = blockBuilder.addRecord(record);
                 for (const auto& block : completeBlocks) {
