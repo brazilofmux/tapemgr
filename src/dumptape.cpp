@@ -130,16 +130,42 @@ enum class SegmentCode {
 
 class SpannedRecordAnalyzer {
 public:
-    static void analyzeBlock(const std::vector<uint8_t>& buffer, size_t blockSize, VerbosityLevel verbosity) {
+    static void analyzeBlock(const std::vector<uint8_t>& buffer, size_t blockSize,
+                           char recordFormat, VerbosityLevel verbosity) {
         if (verbosity < VerbosityLevel::Detailed) return;
 
+        std::cout << "Block Structure Analysis:" << std::endl;
+
+        // For variable formats (V, VB, VS, VBS), interpret BDW/RDW/SDW
+        if (recordFormat == 'V') {
+            analyzeVariableBlock(buffer, blockSize);
+        } else if (recordFormat == 'F') {
+            analyzeFixedBlock(buffer, blockSize);
+        } else {
+            std::cout << "  Unhandled record format: " << recordFormat << std::endl;
+        }
+    }
+
+private:
+    static void analyzeFixedBlock(const std::vector<uint8_t>& buffer, size_t blockSize) {
+        std::cout << "  Fixed-length block: " << blockSize << " bytes" << std::endl;
+        if (blockSize > 0) {
+            std::cout << "  First few bytes: ";
+            for (size_t i = 0; i < std::min<size_t>(16, blockSize); ++i) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0')
+                         << static_cast<int>(buffer[i]) << " ";
+            }
+            std::cout << std::dec << std::endl;
+        }
+    }
+
+    static void analyzeVariableBlock(const std::vector<uint8_t>& buffer, size_t blockSize) {
         if (blockSize < 4) return;  // Need at least BDW size
 
         // First word is the Block Descriptor Word (BDW)
         const RecordDescriptor* bdw = reinterpret_cast<const RecordDescriptor*>(buffer.data());
         uint16_t totalLength = (bdw->length_hi << 8) | bdw->length_lo;
 
-        std::cout << "Block Structure Analysis:" << std::endl;
         std::cout << "  BDW:" << std::endl;
         std::cout << "    Total Length: " << totalLength << " bytes (0x"
                   << std::hex << std::setw(4) << std::setfill('0') << totalLength
@@ -174,7 +200,6 @@ public:
         }
     }
 
-private:
     static void printDescriptorInfo(const RecordDescriptor* desc, SegmentCode segCode) {
         uint16_t length = (desc->length_hi << 8) | desc->length_lo;
         std::cout << "      Length: " << length << " bytes (0x"
@@ -221,7 +246,7 @@ size_t readDataBlock(std::ifstream& file, std::vector<uint8_t>& buffer, int leng
 void printSummary(const std::string& labelFileName, const std::string& labelFileNumber,
                   char labelRECFM, unsigned int labelBLKSIZE, unsigned int labelLRECL,
                   unsigned int labelBLKCOUNT, unsigned int auditBLKCOUNT);
-void printDetail(const AwsTapeBlockHeader& header, const std::vector<uint8_t>& buffer, VerbosityLevel verbosity);
+void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity);
 std::string ebcdicToAsciiString(const unsigned char* ebcdicStr, size_t length);
 
 // EBCDIC to ASCII conversion table
@@ -500,6 +525,8 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
     uint64_t totalBytes = 0;
     int fileCount = 0;
 
+    char currentRecordFormat = 'U';  // Unknown/Undefined initially
+
     while (true) {
         std::streampos blockStart = file.tellg();
 
@@ -511,7 +538,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
             std::cout << "Header size: " << headerSize << " bytes" << std::endl;
         }
 
-        printDetail(header, buffer, verbosity);
+        printDetail(header, verbosity);
 
         if (header.curblkl > 0) {
             size_t dataSize = readDataBlock(file, buffer, header.curblkl);
@@ -545,6 +572,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
             } else if (labelIdentifier == "HDR2") {
                 const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
                 if (validateHDR2Label(*hdr2)) {
+                    currentRecordFormat = ebcdicToAsciiTable[static_cast<unsigned char>(hdr2->recordFormat)];
                     processHDR2Label(*hdr2, verbosity);
                 } else {
                     std::cout << "HDR2 label validation failed" << std::endl;
@@ -559,7 +587,7 @@ void processTape(const std::string& inputFile, VerbosityLevel verbosity) {
                 // Data block
                 if (verbosity >= VerbosityLevel::Detailed) {
                     std::cout << "Data block: " << dataSize << " bytes" << std::endl;
-                    SpannedRecordAnalyzer::analyzeBlock(buffer, dataSize, verbosity);
+                    SpannedRecordAnalyzer::analyzeBlock(buffer, dataSize, currentRecordFormat, verbosity);
                     if (verbosity >= VerbosityLevel::Debug) {
                         std::cout << "First 32 bytes: ";
                         for (size_t i = 0; i < std::min<size_t>(32, dataSize); ++i) {
@@ -623,7 +651,7 @@ void printSummary(const std::string& labelFileName, const std::string& labelFile
               << std::setw(7) << auditBLKCOUNT << std::endl;
 }
 
-void printDetail(const AwsTapeBlockHeader& header, const std::vector<uint8_t>& buffer, VerbosityLevel verbosity) {
+void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     if (verbosity >= VerbosityLevel::Detailed) {
         std::cout << "Block Header:" << std::endl;
         std::cout << "  Current block length: " << header.curblkl << std::endl;

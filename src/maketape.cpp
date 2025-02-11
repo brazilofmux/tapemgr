@@ -363,6 +363,32 @@ private:
 
         bool isBlocked = m_config.recfm.find('B') != std::string::npos;
 
+        if (m_config.binary) {
+            // Start new block if needed
+            if (!isBlocked || m_currentBlockOffset + record.size() > m_config.blksize) {
+                if (m_currentBlockOffset > 0) {
+                    finishCurrentBlock();
+                    completeBlocks.push_back(m_currentBlock);
+                    initializeNewBlock();
+                }
+            }
+
+            // Copy raw data
+            std::copy(record.begin(), record.end(),
+                     m_currentBlock.begin() + m_currentBlockOffset);
+            m_currentBlockOffset += record.size();
+            m_recordCount++;
+
+            // Finish block if unblocked or full
+            if (!isBlocked || m_currentBlockOffset == m_config.blksize) {
+                finishCurrentBlock();
+                completeBlocks.push_back(m_currentBlock);
+                initializeNewBlock();
+            }
+
+            return completeBlocks;
+        }
+
         // For unblocked (F), finish any existing block before starting new record
         if (!isBlocked && m_currentBlockOffset > 0) {
             finishCurrentBlock();
@@ -425,6 +451,64 @@ private:
     }
 };
 
+bool validateFixedBinaryFile(const std::string& filename, uint16_t lrecl) {
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file) {
+        throw std::runtime_error("Unable to open binary file: " + filename);
+    }
+
+    size_t fileSize = file.tellg();
+    if (fileSize % lrecl != 0) {
+        throw std::runtime_error("Fixed-length binary file size (" +
+                               std::to_string(fileSize) +
+                               ") must be a multiple of LRECL (" +
+                               std::to_string(lrecl) + ")");
+    }
+    return true;
+}
+
+bool validateVariableBinaryFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Unable to open binary file: " + filename);
+    }
+
+    size_t fileSize = file.tellg();
+    size_t offset = 0;
+
+    while (offset < fileSize) {
+        // Read RDW
+        uint8_t rdw[4];
+        if (!file.read(reinterpret_cast<char*>(rdw), 4)) {
+            throw std::runtime_error("Invalid variable-length binary file: Missing RDW at record boundary");
+        }
+
+        // Extract length (big-endian)
+        uint16_t length = (rdw[0] << 8) | rdw[1];
+
+        // Validate RDW
+        if (rdw[2] != 0 || rdw[3] != 0) {
+            std::cout << "Warning: Non-zero bytes in RDW reserved field - clearing" << std::endl;
+        }
+
+        // Validate length
+        if (length < 4 || offset + length > fileSize) {
+            throw std::runtime_error("Malformed RDW: Record length exceeds file size");
+        }
+
+        // Skip record data
+        file.seekg(length - 4, std::ios::cur);
+        offset += length;
+    }
+
+    // Validate we consumed exactly the whole file
+    if (offset != fileSize) {
+        throw std::runtime_error("Variable-length binary file size mismatch with RDW lengths");
+    }
+
+    return true;
+}
+
 class AwsTapeMaker {
 public:
     AwsTapeMaker(const std::string& volser, const std::string& outputFile,
@@ -446,7 +530,8 @@ public:
 
     void addFile(const FileConfig& config) {
         std::cout << "Adding file: " << config.inputFile << std::endl;
-        // Verify input file
+
+        // Verify input file exists
         std::ifstream testFile(config.inputFile, std::ios::binary);
         if (!testFile) {
             throw std::runtime_error("Unable to open input file: " + config.inputFile);
@@ -458,13 +543,20 @@ public:
             throw std::runtime_error("LRECL and BLKSIZE must be non-zero for file: " + config.inputFile);
         }
 
-        // Format-specific validation
-        if (config.recordFormat == 'F') {
-            if (config.recfm.find('B') != std::string::npos) {
-                // FB - BLKSIZE must be multiple of LRECL
-                if (config.blksize % config.lrecl != 0) {
-                    throw std::runtime_error("For FB format, BLKSIZE must be multiple of LRECL for file: " + config.inputFile);
-                }
+        // Binary mode validations
+        if (config.binary) {
+            if (config.recordFormat == 'F') {
+                validateFixedBinaryFile(config.inputFile, config.lrecl);
+            } else if (config.recordFormat == 'V') {
+                validateVariableBinaryFile(config.inputFile);
+            } else {
+                throw std::runtime_error("Binary mode only supported for F and V formats");
+            }
+        }
+        // Text mode validations for fixed formats
+        else if (config.recordFormat == 'F') {
+            if (config.recfm.find('B') != std::string::npos && config.blksize % config.lrecl != 0) {
+                throw std::runtime_error("For FB format, BLKSIZE must be multiple of LRECL for file: " + config.inputFile);
             }
         }
 
