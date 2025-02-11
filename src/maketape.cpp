@@ -175,25 +175,31 @@ public:
     std::vector<std::vector<uint8_t>> addRecord(const std::vector<uint8_t>& record) {
         std::vector<std::vector<uint8_t>> completeBlocks;
 
-        switch(m_config.recordFormat) {
-            case 'V':
-                return addVariableRecord(record, false); // Not blocked
-            case 'F':
-                return addFixedRecord(record);
-            default:
-                if (m_config.recfm.find('B') != std::string::npos) {
-                    if (m_config.recordFormat == 'V') {
-                        return addVariableRecord(record, true); // Blocked
-                    }
+        // First determine if this is a spanned format
+        bool isSpanned = m_config.recfm.find('S') != std::string::npos;
+        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
+
+        if (m_config.recordFormat == 'V') {
+            if (isSpanned) {
+                if (isBlocked) {
+                    return addVBSRecord(record);
+                } else {
+                    return addVSRecord(record);
                 }
-                throw std::runtime_error("Unsupported record format: " + m_config.recfm);
+            } else if (isBlocked) {
+                return addVariableRecord(record, true);
+            } else {
+                return addVariableRecord(record, false);
+            }
+        } else if (m_config.recordFormat == 'F') {
+            return addFixedRecord(record);
         }
 
-        return completeBlocks;
+        throw std::runtime_error("Unsupported record format: " + m_config.recfm);
     }
 
     std::vector<uint8_t> flush() {
-        if (m_currentBlockOffset > 4) {  // If we have any data beyond BDW
+        if (m_currentBlockOffset > 4) {
             if (m_verbosity >= VerbosityLevel::Debug) {
                 std::cout << "Flushing final block of size: " << m_currentBlockOffset << std::endl;
             }
@@ -210,17 +216,83 @@ private:
     VerbosityLevel m_verbosity;
     std::vector<uint8_t> m_currentBlock;
     size_t m_currentBlockOffset;
-    int m_recordCount = 0;  // For logging
+    int m_recordCount = 0;
 
     void initializeNewBlock() {
         m_currentBlock.clear();
-        m_currentBlock.resize(m_config.blksize, 0x40);  // Initialize with EBCDIC space
-        m_currentBlockOffset = 4;  // Start after BDW
+        m_currentBlock.resize(m_config.blksize, 0x40);
+        m_currentBlockOffset = 4;
         m_recordCount = 0;
 
         if (m_verbosity >= VerbosityLevel::Debug) {
             std::cout << "Initialized new block with size: " << m_config.blksize << std::endl;
         }
+    }
+
+    // Helper function to add SDW to block
+    void addSDW(uint16_t length, uint8_t segmentControl) {
+        m_currentBlock[m_currentBlockOffset] = length >> 8;       // Length high byte
+        m_currentBlock[m_currentBlockOffset + 1] = length;        // Length low byte
+        m_currentBlock[m_currentBlockOffset + 2] = segmentControl;// Segment control
+        m_currentBlock[m_currentBlockOffset + 3] = 0;            // Reserved
+    }
+
+    std::vector<std::vector<uint8_t>> addVSRecord(const std::vector<uint8_t>& record) {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+        size_t remainingData = record.size();
+        size_t dataOffset = 0;
+        bool isFirstSegment = true;
+
+        while (remainingData > 0) {
+            // Calculate maximum data that can fit in this block
+            size_t maxDataInBlock = m_config.blksize - m_currentBlockOffset - 4; // Account for SDW
+            size_t dataInThisSegment = std::min(remainingData, maxDataInBlock);
+            bool isLastSegment = (dataInThisSegment == remainingData);
+
+            // If current block doesn't have enough space, finish it and start new one
+            if (m_currentBlockOffset + dataInThisSegment + 4 > m_config.blksize) {
+                finishCurrentBlock();
+                completeBlocks.push_back(m_currentBlock);
+                initializeNewBlock();
+            }
+
+            // Set segment control code
+            uint8_t segmentControl = 0;
+            if (isFirstSegment && isLastSegment) segmentControl = 0b00;      // Complete logical record
+            else if (isFirstSegment) segmentControl = 0b01;                  // First segment
+            else if (isLastSegment) segmentControl = 0b10;                   // Last segment
+            else segmentControl = 0b11;                                      // Middle segment
+
+            // Add SDW
+            uint16_t segmentLength = dataInThisSegment + 4;  // Include SDW size
+            addSDW(segmentLength, segmentControl);
+
+            // Copy data
+            std::copy(record.begin() + dataOffset,
+                     record.begin() + dataOffset + dataInThisSegment,
+                     m_currentBlock.begin() + m_currentBlockOffset + 4);
+
+            m_currentBlockOffset += segmentLength;
+            dataOffset += dataInThisSegment;
+            remainingData -= dataInThisSegment;
+            isFirstSegment = false;
+
+            if (m_verbosity >= VerbosityLevel::Debug) {
+                std::cout << "Added VS segment:"
+                          << "\n  Length: " << segmentLength
+                          << "\n  Control: 0x" << std::hex << (int)segmentControl << std::dec
+                          << "\n  Remaining data: " << remainingData
+                          << std::endl;
+            }
+        }
+
+        return completeBlocks;
+    }
+
+    std::vector<std::vector<uint8_t>> addVBSRecord(const std::vector<uint8_t>& record) {
+        // For VBS, we'll use the same logic as VS but we'll try to pack multiple
+        // segments into blocks when possible
+        return addVSRecord(record);
     }
 
     std::vector<std::vector<uint8_t>> addVariableRecord(const std::vector<uint8_t>& record, bool blocked) {
@@ -318,14 +390,11 @@ private:
     }
 
     void finishCurrentBlock() {
-        // Set BDW
         uint16_t blockLength = m_currentBlockOffset;
-        m_currentBlock[0] = blockLength >> 8;    // Length high byte
-        m_currentBlock[1] = blockLength;         // Length low byte
-        m_currentBlock[2] = 0;                   // Flags
-        m_currentBlock[3] = 0;                   // Reserved
-
-        // Ensure block is properly sized
+        m_currentBlock[0] = blockLength >> 8;
+        m_currentBlock[1] = blockLength;
+        m_currentBlock[2] = 0;
+        m_currentBlock[3] = 0;
         m_currentBlock.resize(m_currentBlockOffset);
 
         if (m_verbosity >= VerbosityLevel::Debug) {
