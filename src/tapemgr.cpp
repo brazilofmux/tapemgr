@@ -1669,52 +1669,43 @@ void AwsTapeDumper::writeConfig(const std::string& filename) const {
 bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
     try {
         // Check required top-level fields
-        if (!config.contains("volume_serial")) {
-            error = "Missing required field 'volume_serial'";
-            return false;
-        }
-        if (!config.contains("files")) {
-            error = "Missing required field 'files'";
-            return false;
+        for (const auto& field : {"volume_serial", "files"}) {
+            if (!config.contains(field)) {
+                error = "Missing required field '" + std::string(field) + "'";
+                return false;
+            }
         }
 
         // Validate volume_serial
-        if (!config["volume_serial"].is_string()) {
-            error = "Field 'volume_serial' must be a string";
-            return false;
-        }
-        std::string volser = config["volume_serial"];
-        if (volser.length() > 6 || !std::all_of(volser.begin(), volser.end(),
-            [](char c) { return std::isupper(c) || std::isdigit(c); })) {
-            error = "Invalid volume_serial format. Must be 1-6 uppercase letters or numbers";
+        if (!config["volume_serial"].is_string() ||
+            config["volume_serial"].get<std::string>().length() > 6) {
+            error = "volume_serial must be 1-6 characters";
             return false;
         }
 
-        // Validate owner_code if present
+        // Optional owner_code
         if (config.contains("owner_code")) {
-            if (!config["owner_code"].is_string()) {
-                error = "Field 'owner_code' must be a string";
+            if (!config["owner_code"].is_string() ||
+                config["owner_code"].get<std::string>().length() > 10) {
+                error = "owner_code must be 1-10 characters";
                 return false;
             }
-            std::string owner = config["owner_code"];
-            if (owner.length() > 10 || !std::all_of(owner.begin(), owner.end(),
-                [](char c) { return std::isupper(c) || std::isdigit(c); })) {
-                error = "Invalid owner_code format. Must be 1-10 uppercase letters or numbers";
-                return false;
-            }
-        }
-
-        // Validate files array
-        if (!config["files"].is_array()) {
-            error = "Field 'files' must be an array";
-            return false;
         }
 
         const std::set<std::string> validRecFM = {"F", "FB", "V", "VB", "VS", "VBS", "U"};
+        const std::set<std::string> validBlockAttrs = {"B", "S", "R", " "};
+        const std::set<std::string> validDatasetOrgs = {"PS"};  // Could expand later
+
+        // Validate files array
+        if (!config["files"].is_array()) {
+            error = "files must be an array";
+            return false;
+        }
 
         for (const auto& file : config["files"]) {
-            // Check required fields
-            for (const auto& field : {"dataset_name", "record_format", "record_length", "block_size"}) {
+            // Required fields
+            for (const auto& field : {"dataset_name", "local_file", "record_format",
+                                    "record_length", "block_size"}) {
                 if (!file.contains(field)) {
                     error = std::string("Missing required field '") + field + "' in file entry";
                     return false;
@@ -1722,71 +1713,35 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
             }
 
             // Validate dataset_name
-            if (!file["dataset_name"].is_string()) {
-                error = "Field 'dataset_name' must be a string";
-                return false;
-            }
-            std::string dsn = file["dataset_name"];
-            if (dsn.length() > 17 || !std::all_of(dsn.begin(), dsn.end(),
-                [](char c) { return std::isupper(c) || std::isdigit(c) || c == '.'; })) {
-                error = "Invalid dataset_name format. Must be 1-17 uppercase letters, numbers, or periods";
+            if (!file["dataset_name"].is_string() ||
+                file["dataset_name"].get<std::string>().length() > 44) {
+                error = "dataset_name must be 1-44 characters";
                 return false;
             }
 
             // Validate record_format
-            if (!file["record_format"].is_string()) {
-                error = "Field 'record_format' must be a string";
-                return false;
-            }
-            std::string recfm = file["record_format"];
-            if (validRecFM.find(recfm) == validRecFM.end()) {
+            if (!file["record_format"].is_string() ||
+                validRecFM.find(file["record_format"].get<std::string>()) == validRecFM.end()) {
                 error = "Invalid record_format. Must be one of: F, FB, V, VB, VS, VBS, U";
                 return false;
             }
 
-            // Validate numeric fields
-            if (!file["record_length"].is_number_integer() ||
-                file["record_length"] < 1 || file["record_length"] > 32760) {
-                error = "record_length must be an integer between 1 and 32760";
-                return false;
-            }
-
-            if (!file["block_size"].is_number_integer() ||
-                file["block_size"] < 1 || file["block_size"] > 32760) {
-                error = "block_size must be an integer between 1 and 32760";
-                return false;
-            }
-
-            // Validate record format specific rules
-            int reclen = file["record_length"];
-            int blksize = file["block_size"];
-
-            if (recfm == "F" && blksize != reclen) {
-                error = "For F format, block size must equal record length";
-                return false;
-            }
-
-            if (recfm == "FB" && (blksize % reclen != 0)) {
-                error = "For FB format, block size must be a multiple of record length";
-                return false;
-            }
-
-            // Validate local_file if present (required for extraction)
-            if (file.contains("local_file")) {
-                if (!file["local_file"].is_string()) {
-                    error = "Field 'local_file' must be a string";
-                    return false;
-                }
-                if (file["local_file"].get<std::string>().empty()) {
-                    error = "Local file name must be specified for extraction";
+            // Validate block_attribute if present
+            if (file.contains("block_attribute")) {
+                if (!file["block_attribute"].is_string() ||
+                    validBlockAttrs.find(file["block_attribute"].get<std::string>()) == validBlockAttrs.end()) {
+                    error = "Invalid block_attribute. Must be one of: B, S, R, or space";
                     return false;
                 }
             }
 
-            // Validate binary flag if present
-            if (file.contains("binary") && !file["binary"].is_boolean()) {
-                error = "Field 'binary' must be a boolean";
-                return false;
+            // Validate dataset_org if present
+            if (file.contains("dataset_org")) {
+                if (!file["dataset_org"].is_string() ||
+                    validDatasetOrgs.find(file["dataset_org"].get<std::string>()) == validDatasetOrgs.end()) {
+                    error = "Invalid dataset_org. Must be: PS";
+                    return false;
+                }
             }
 
             // Validate dates if present
@@ -1810,18 +1765,24 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                 return false;
             }
 
-            // Validate file_position if present (required for extraction)
-            if (!file.contains("file_position")) {
-                error = "Missing required field 'file_position' in file entry";
+            // Validate numeric fields
+            if (!file["record_length"].is_number_integer() ||
+                file["record_length"].get<int>() < 1 ||
+                file["record_length"].get<int>() > 32760) {
+                error = "record_length must be between 1 and 32760";
                 return false;
             }
-            if (!file["file_position"].is_number_integer()) {
-                error = "Field 'file_position' must be an integer";
+
+            if (!file["block_size"].is_number_integer() ||
+                file["block_size"].get<int>() < 1 ||
+                file["block_size"].get<int>() > 32760) {
+                error = "block_size must be between 1 and 32760";
                 return false;
             }
-            // Allow only non-negative file positions
-            if (file["file_position"].get<int64_t>() < 0) {
-                error = "Field 'file_position' must be non-negative";
+
+            // Validate binary flag if present
+            if (file.contains("binary") && !file["binary"].is_boolean()) {
+                error = "binary must be a boolean value";
                 return false;
             }
         }
@@ -1830,10 +1791,6 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
     }
     catch (const json::exception& e) {
         error = std::string("JSON validation error: ") + e.what();
-        return false;
-    }
-    catch (const std::exception& e) {
-        error = std::string("Validation error: ") + e.what();
         return false;
     }
 }
@@ -2635,49 +2592,55 @@ public:
         }
     }
 
+    void addFile(const json& fileConfig) {
+        FileConfig config;
+
+        // Required fields
+        config.datasetName = fileConfig["dataset_name"].get<std::string>();
+        config.inputFile = fileConfig["local_file"].get<std::string>();
+        config.recfm = fileConfig["record_format"].get<std::string>();
+        config.lrecl = fileConfig["record_length"].get<uint16_t>();
+        config.blksize = fileConfig["block_size"].get<uint16_t>();
+
+        // Optional fields with defaults
+        config.binary = fileConfig.value("binary", false);
+
+        // Handle block attribute
+        if (fileConfig.contains("block_attribute")) {
+            config.blockAttribute = fileConfig["block_attribute"].get<std::string>()[0];
+        } else {
+            // Derive from record format
+            config.blockAttribute = ' ';
+            if (config.recfm.find('B') != std::string::npos) {
+                config.blockAttribute = 'B';
+            }
+            if (config.recfm.find('S') != std::string::npos) {
+                config.blockAttribute = (config.blockAttribute == 'B') ? 'R' : 'S';
+            }
+        }
+
+        // Base record format
+        config.recordFormat = config.recfm[0];  // F, V, or U
+
+        // Store creation/expiration dates for label creation
+        if (fileConfig.contains("creation_date")) {
+            m_creationDate = fileConfig["creation_date"].get<std::string>();
+        }
+        if (fileConfig.contains("expiration_date")) {
+            m_expirationDate = fileConfig["expiration_date"].get<std::string>();
+        }
+
+        addFile(config);  // Call the FileConfig version
+    }
+
+    // Add FileConfig version
     void addFile(const FileConfig& config) {
-        std::cout << "Adding file: " << config.inputFile << std::endl;
-
         // Verify input file exists
-        std::ifstream testFile(config.inputFile, std::ios::binary);
-        if (!testFile) {
-            throw std::runtime_error("Unable to open input file: " + config.inputFile);
-        }
-        testFile.close();
-
-        // Basic validation - no zero lengths
-        if (config.lrecl == 0 || config.blksize == 0) {
-            throw std::runtime_error("LRECL and BLKSIZE must be non-zero for file: " + config.inputFile);
+        if (!std::filesystem::exists(config.inputFile)) {
+            throw std::runtime_error("Input file not found: " + config.inputFile);
         }
 
-        // Binary mode validations
-        if (config.binary) {
-            if (config.recordFormat == 'F') {
-                validateFixedBinaryFile(config.inputFile, config.lrecl);
-            } else if (config.recordFormat == 'V') {
-                validateVariableBinaryFile(config.inputFile);
-            } else {
-                throw std::runtime_error("Binary mode only supported for F and V formats");
-            }
-        }
-        // Text mode validations for fixed formats
-        else if (config.recordFormat == 'F') {
-            if (config.recfm.find('B') != std::string::npos && config.blksize % config.lrecl != 0) {
-                throw std::runtime_error("For FB format, BLKSIZE must be multiple of LRECL for file: " + config.inputFile);
-            }
-        }
-
-        // Verify RECFM
-        if (config.recordFormat != 'F' && config.recordFormat != 'V' && config.recordFormat != 'U') {
-            throw std::runtime_error("Invalid RECFM for file: " + config.inputFile);
-        }
-
-        // Verify Block Attribute
-        if (config.blockAttribute != ' ' && config.blockAttribute != 'B' &&
-            config.blockAttribute != 'S' && config.blockAttribute != 'R') {
-            throw std::runtime_error("Invalid Block Attribute for file: " + config.inputFile);
-        }
-
+        validateFileConfig(config);
         m_files.push_back(config);
     }
 
@@ -2716,6 +2679,23 @@ private:
     int m_blockCount;
     std::string m_ownerCode;
     std::string m_jobId;
+    std::string m_creationDate;
+    std::string m_expirationDate;
+
+    // Add validation method
+    void validateFileConfig(const FileConfig& config) {
+        // Verify record format combinations
+        if (config.recordFormat == 'F') {
+            if (!config.binary && config.blksize != config.lrecl) {
+                throw std::runtime_error("For F format, BLKSIZE must equal LRECL");
+            }
+        }
+        if (config.recfm.find('B') != std::string::npos) {
+            if (config.blksize % config.lrecl != 0) {
+                throw std::runtime_error("For blocked formats, BLKSIZE must be multiple of LRECL");
+            }
+        }
+    }
 
     std::string createVOL1Label() {
         std::string label = "VOL1";
@@ -3153,7 +3133,7 @@ int main(int argc, char* argv[]) {
                         fc.blockAttribute = (fc.blockAttribute == 'B') ? 'R' : 'S';  // Spanned or Blocked and Spanned
                     }
 
-                    tapeMaker.addFile(fc);
+                    tapeMaker.addFile(fileConfig);
                 }
                 tapeMaker.writeTape();
 
