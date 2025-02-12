@@ -126,6 +126,8 @@ struct TapeFileInfo {
     std::streampos fileStart;    // Position in the tape file where this file starts
     std::streampos dataStart;    // Position where the actual data blocks start
     std::streampos dataEnd;      // Position where the data blocks end
+    std::string creationDate;    // CYYDDD format from HDR1
+    std::string expirationDate;  // CYYDDD format from HDR1
 };
 
 struct VOL1Label {
@@ -1282,7 +1284,9 @@ public:
 
     // Primary operations
     bool scanTape();                          // First pass: scan and build table of contents
-    std::vector<TapeFileInfo> getFiles();     // Get information about files found on tape
+    const std::vector<TapeFileInfo>& getFiles() const {
+        return m_files;
+    }
     bool extractFile(const TapeFileInfo& file, const std::string& outputPath); // Extract specific file
 
     // Label validation methods (public to allow reuse)
@@ -1302,8 +1306,69 @@ public:
     // Config loading
     static json loadConfig(const std::string& filename, std::string& error);
 
-    void extractFile(const json& config);
-    bool extractFiles(const json& config);
+    // Combine scan and extract for better efficiency
+    bool extractFiles(const json& config, bool validateOnly = false) {
+        // Verify volume serial matches if specified
+        if (config.contains("volume_serial") &&
+            config["volume_serial"] != m_currentVolser) {
+            std::cerr << "Warning: Config volume serial " << config["volume_serial"]
+                     << " doesn't match tape volume " << m_currentVolser << std::endl;
+        }
+
+        if (validateOnly) {
+            return true;  // Just checking structure
+        }
+
+        bool success = true;
+        for (const auto& fileConfig : config["files"]) {
+            try {
+                if (fileConfig["local_file"].empty()) {
+                    if (m_verbosity >= VerbosityLevel::Normal) {
+                        std::cout << "Skipping dataset " << fileConfig["dataset_name"]
+                                 << " (no output file specified)" << std::endl;
+                    }
+                    continue;
+                }
+
+                extractFile(fileConfig);
+
+            } catch (const std::exception& e) {
+                std::cerr << "Error extracting dataset " << fileConfig["dataset_name"]
+                         << ": " << e.what() << std::endl;
+                success = false;
+                if (m_verbosity < VerbosityLevel::Detailed) {
+                    break;  // Stop on first error unless detailed mode
+                }
+            }
+        }
+
+        return success;
+    }
+
+    // Add getter for volume serial
+    std::string getVolumeSerial() const {
+        return m_currentVolser;
+    }
+
+    std::string getOwnerCode() const {
+        return m_ownerCode;
+    }
+
+protected:
+    // Helper for extracting a single file
+    void extractFile(const json& fileConfig) {
+        if (m_verbosity >= VerbosityLevel::Normal) {
+            std::cout << "Extracting dataset: " << fileConfig["dataset_name"] << std::endl;
+        }
+
+        // Convert position from JSON integer to streampos
+        auto fileStart = static_cast<std::streampos>(fileConfig["file_position"].get<int64_t>());
+        m_tapeFile.clear();
+        m_tapeFile.seekg(fileStart);
+
+        ExtractionPipeline pipeline(m_tapeFile, fileConfig, m_verbosity);
+        pipeline.extract();
+    }
 
 private:
     // Internal processing methods
@@ -1331,6 +1396,8 @@ private:
 
     // Current file being processed
     TapeFileInfo m_currentFile;
+
+    std::string m_ownerCode;
 };
 
 AwsTapeDumper::AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbosity)
@@ -1353,17 +1420,6 @@ AwsTapeDumper::~AwsTapeDumper() {
     if (m_tapeFile.is_open()) {
         m_tapeFile.close();
     }
-}
-
-std::vector<TapeFileInfo> AwsTapeDumper::getFiles() {
-    // If we haven't scanned yet, m_files will be empty
-    if (m_files.empty()) {
-        if (m_verbosity >= VerbosityLevel::Normal) {
-            std::cout << "Warning: No files found. Has the tape been scanned?" << std::endl;
-        }
-    }
-
-    return m_files;
 }
 
 bool AwsTapeDumper::readBlock(AwsTapeBlockHeader& header, std::vector<uint8_t>& data) {
@@ -1619,12 +1675,14 @@ json AwsTapeDumper::generateConfig() const {
 
     // Add volume-level information
     config["volume_serial"] = m_currentVolser;
-    config["owner_code"] = "TAPEOWNR";  // We could extract this from VOL1 if needed
+    config["owner_code"] = m_ownerCode;
 
     // Add files array
     json files = json::array();
     for (const auto& file : m_files) {
         json fileObj;
+
+        // Required fields
         fileObj["dataset_name"] = file.datasetName;
         fileObj["local_file"] = "";  // Empty by default, to be filled in by user
 
@@ -1641,11 +1699,23 @@ json AwsTapeDumper::generateConfig() const {
 
         fileObj["record_length"] = file.recordLength;
         fileObj["block_size"] = file.blockSize;
-        fileObj["block_count"] = file.blockCount;
-        fileObj["binary"] = false;  // Default to false, user can modify
 
-        // Store file position as int64_t
+        // Optional fields with sensible defaults
+        fileObj["binary"] = false;  // Default to text mode
+        fileObj["block_attribute"] = std::string(1, file.blockAttribute);
+        fileObj["dataset_org"] = "PS";  // Physical Sequential
+
+        // Metadata fields
+        fileObj["block_count"] = file.blockCount;
         fileObj["file_position"] = static_cast<int64_t>(file.dataStart);
+
+        // Add creation/expiration dates if available from HDR1
+        if (!file.creationDate.empty()) {
+            fileObj["creation_date"] = file.creationDate;
+        }
+        if (!file.expirationDate.empty()) {
+            fileObj["expiration_date"] = file.expirationDate;
+        }
 
         files.push_back(fileObj);
     }
@@ -1824,26 +1894,27 @@ json AwsTapeDumper::loadConfig(const std::string& filename, std::string& error) 
 
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
     m_currentVolser = EbcdicUtil::ebcdicToUtf8String(label.volumeSerial, 6, true);
+    m_ownerCode = EbcdicUtil::ebcdicToUtf8String(label.ownerCode, 10, true);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
-        std::cout << "VOL1 Label found" << std::endl;
-        std::cout << "  Volume Serial: " << m_currentVolser << std::endl;
-        std::cout << "  Owner Code: " << EbcdicUtil::ebcdicToUtf8String(label.ownerCode, 10, true) << std::endl;
+	std::cout << "VOL1 Label found" << std::endl;
+	std::cout << "  Volume Serial: " << m_currentVolser << std::endl;
+	std::cout << "  Owner Code: " << m_ownerCode << std::endl;
     }
 }
 
 void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
     m_currentFile.datasetName = EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true);
     m_currentFile.volumeSerial = EbcdicUtil::ebcdicToUtf8String(label.dataSetSerialNumber, 6, true);
+    m_currentFile.creationDate = EbcdicUtil::ebcdicToUtf8String(label.creationDate, 6);
+    m_currentFile.expirationDate = EbcdicUtil::ebcdicToUtf8String(label.expirationDate, 6);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "HDR1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << m_currentFile.datasetName << std::endl;
         std::cout << "  Dataset Serial Number: " << m_currentFile.volumeSerial << std::endl;
-        std::cout << "  Volume Sequence Number: " << EbcdicUtil::ebcdicToUtf8String(label.volumeSequenceNumber, 4, true) << std::endl;
-        std::cout << "  Dataset Sequence Number: " << EbcdicUtil::ebcdicToUtf8String(label.dataSetSequenceNumber, 4, true) << std::endl;
-        std::cout << "  Creation Date: " << EbcdicUtil::ebcdicToUtf8String(label.creationDate, 6, true) << std::endl;
-        std::cout << "  Expiration Date: " << EbcdicUtil::ebcdicToUtf8String(label.expirationDate, 6, true) << std::endl;
+        std::cout << "  Creation Date: " << m_currentFile.creationDate << std::endl;
+        std::cout << "  Expiration Date: " << m_currentFile.expirationDate << std::endl;
         std::cout << "  Dataset Security: " << EbcdicUtil::ebcdicToUtf8String(&label.dataSetSecurity, 1) << std::endl;
     }
 }
@@ -1895,56 +1966,6 @@ void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
         std::cout << "  Control Character: " << EbcdicUtil::ebcdicToUtf8String(&label.controlCharacter, 1)<< std::endl;
         std::cout << "  Device Serial Number: " << EbcdicUtil::ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
     }
-}
-
-// In extractFile, when retrieving file position:
-void AwsTapeDumper::extractFile(const json& fileConfig) {
-    m_tapeFile.clear();
-
-    // Convert int64_t to streampos
-    auto fileStart = static_cast<std::streampos>(fileConfig["file_position"].get<int64_t>());
-    m_tapeFile.seekg(fileStart);
-
-    if (m_verbosity >= VerbosityLevel::Normal) {
-        std::cout << "Extracting dataset: " << fileConfig["dataset_name"] << std::endl;
-    }
-
-    ExtractionPipeline pipeline(m_tapeFile, fileConfig, m_verbosity);
-    pipeline.extract();
-}
-
-// Update AwsTapeDumper to support extraction mode
-bool AwsTapeDumper::extractFiles(const json& config) {
-    if (!config.contains("files") || !config["files"].is_array()) {
-        throw std::runtime_error("Invalid configuration: missing files array");
-    }
-
-    bool success = true;
-    for (const auto& fileConfig : config["files"]) {
-        try {
-            if (fileConfig["local_file"].empty()) {
-                if (m_verbosity >= VerbosityLevel::Normal) {
-                    std::cout << "Skipping dataset " << fileConfig["dataset_name"]
-                             << " (no output file specified)" << std::endl;
-                }
-                continue;
-            }
-
-            extractFile(fileConfig);
-
-        } catch (const std::exception& e) {
-            std::cerr << "Error extracting dataset " << fileConfig["dataset_name"]
-                     << ": " << e.what() << std::endl;
-            success = false;
-            if (m_verbosity >= VerbosityLevel::Detailed) {
-                // Continue with other files in detailed mode
-                continue;
-            }
-            break;
-        }
-    }
-
-    return success;
 }
 
 int calculateOptimalBlksize(int lrecl)
@@ -3100,10 +3121,6 @@ int main(int argc, char* argv[]) {
         switch (options.mode) {
             case OperationMode::Create: {
                 // Create mode (former maketape functionality)
-                if (options.verbosity >= VerbosityLevel::Normal) {
-                    std::cout << "Creating AWS tape file: " << options.outputFile << std::endl;
-                }
-
                 std::string error;
                 json config = AwsTapeDumper::loadConfig(options.configFile, error);
                 if (config.is_null()) {
@@ -3111,40 +3128,17 @@ int main(int argc, char* argv[]) {
                 }
 
                 AwsTapeMaker tapeMaker(options.volser, options.outputFile,
-                                     options.ownerCode.empty() ? "TAPEOWNER" : options.ownerCode,
-                                     "TAPEMGR/CREATE", options.verbosity);
+                                      options.ownerCode.empty() ? "TAPEOWNER" : options.ownerCode,
+                                      "TAPEMGR/CREATE", options.verbosity);
 
                 for (const auto& fileConfig : config["files"]) {
-                    FileConfig fc;
-                    fc.inputFile = fileConfig["local_file"].get<std::string>();
-                    fc.datasetName = fileConfig["dataset_name"].get<std::string>();
-                    fc.recfm = fileConfig["record_format"].get<std::string>();
-                    fc.recordFormat = fc.recfm[0];  // F, V, or U
-                    fc.lrecl = fileConfig["record_length"].get<uint16_t>();
-                    fc.blksize = fileConfig["block_size"].get<uint16_t>();
-                    fc.binary = fileConfig.value("binary", false);
-
-                    // Set block attribute
-                    fc.blockAttribute = ' ';
-                    if (fc.recfm.find('B') != std::string::npos) {
-                        fc.blockAttribute = 'B';  // Blocked
-                    }
-                    if (fc.recfm.find('S') != std::string::npos) {
-                        fc.blockAttribute = (fc.blockAttribute == 'B') ? 'R' : 'S';  // Spanned or Blocked and Spanned
-                    }
-
-                    tapeMaker.addFile(fileConfig);
+                    tapeMaker.addFile(fileConfig);  // Now using JSON directly
                 }
                 tapeMaker.writeTape();
-
-                if (options.verbosity >= VerbosityLevel::Normal) {
-                    std::cout << "AWS tape file created successfully: " << options.outputFile << std::endl;
-                }
                 break;
             }
 
             case OperationMode::Extract: {
-                // Extract mode (former dumptape extract functionality)
                 if (options.inputFiles.size() != 1) {
                     throw std::runtime_error("Extract mode requires exactly one input tape file");
                 }
@@ -3155,7 +3149,13 @@ int main(int argc, char* argv[]) {
                     throw std::runtime_error("Error loading configuration: " + error);
                 }
 
+                // Validate input tape volser matches config if specified
                 AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity);
+                if (!tapeDumper.scanTape()) {
+                    throw std::runtime_error("No valid files found on tape");
+                }
+
+                // For each requested file in config, extract it
                 if (!tapeDumper.extractFiles(config)) {
                     throw std::runtime_error("Some files failed to extract");
                 }
@@ -3168,7 +3168,6 @@ int main(int argc, char* argv[]) {
 
             case OperationMode::Scan:
             case OperationMode::Init: {
-                // Scan/Init mode (former dumptape scan/init functionality)
                 for (const auto& inputFile : options.inputFiles) {
                     AwsTapeDumper tapeDumper(inputFile, options.verbosity);
 
@@ -3178,6 +3177,7 @@ int main(int argc, char* argv[]) {
                     }
 
                     if (options.mode == OperationMode::Init) {
+                        // Generate standardized JSON config
                         std::string configFile = options.outputFile.empty() ?
                                                inputFile + ".json" : options.outputFile;
                         tapeDumper.writeConfig(configFile);
@@ -3186,15 +3186,28 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    if (options.verbosity >= VerbosityLevel::Detailed) {
+                    // Display tape contents if requested
+                    if (options.verbosity >= VerbosityLevel::Normal ||
+                        options.mode == OperationMode::Scan) {
                         auto files = tapeDumper.getFiles();
+                        std::cout << "\nTape: " << inputFile << std::endl;
+                        std::cout << "Volume Serial: " << tapeDumper.getVolumeSerial() << std::endl;
+                        std::cout << "Files: " << files.size() << std::endl;
+
                         for (const auto& file : files) {
-                            std::cout << "  Dataset: " << file.datasetName << std::endl;
-                            std::cout << "    Record Format: " << file.recordFormat
-                                     << " Block Attribute: " << file.blockAttribute << std::endl;
-                            std::cout << "    Block Size: " << file.blockSize
-                                     << " Record Length: " << file.recordLength << std::endl;
-                            std::cout << "    Block Count: " << file.blockCount << std::endl;
+                            std::cout << "\nDataset: " << file.datasetName << std::endl;
+                            std::cout << "  Format: " << file.recordFormat
+                                     << (file.blockAttribute != ' ' ?
+                                        std::string(1, file.blockAttribute) : "") << std::endl;
+                            std::cout << "  Record Length: " << file.recordLength << std::endl;
+                            std::cout << "  Block Size: " << file.blockSize << std::endl;
+                            std::cout << "  Blocks: " << file.blockCount << std::endl;
+                            if (!file.creationDate.empty()) {
+                                std::cout << "  Created: " << file.creationDate << std::endl;
+                            }
+                            if (!file.expirationDate.empty()) {
+                                std::cout << "  Expires: " << file.expirationDate << std::endl;
+                            }
                         }
                     }
                 }
