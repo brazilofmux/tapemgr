@@ -37,11 +37,6 @@ struct TapeFileInfo {
     std::streampos dataEnd;      // Position where the data blocks end
 };
 
-struct ProgramOptions {
-    VerbosityLevel verbosity = VerbosityLevel::Normal;
-    std::vector<std::string> inputFiles;
-};
-
 // Define structs
 struct AwsTapeBlockHeader {
     uint16_t curblkl;
@@ -616,17 +611,34 @@ void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
     }
 }
 
+enum class OperationMode {
+    Scan,       // Just examine the tape
+    Init,       // Create JSON template
+    Extract     // Extract files using JSON config
+};
+
+struct ProgramOptions {
+    VerbosityLevel verbosity = VerbosityLevel::Normal;
+    OperationMode mode = OperationMode::Scan;
+    std::vector<std::string> inputFiles;
+    std::string configFile;  // For extract mode
+};
+
 void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
     static struct option long_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
+        {"scan", no_argument, 0, 's'},
+        {"init", no_argument, 0, 'i'},
+        {"extract", required_argument, 0, 'e'},
         {0, 0, 0, 0}
     };
 
     int opt;
     int option_index = 0;
+    bool mode_set = false;
 
-    while ((opt = getopt_long(argc, argv, "vh", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "vhsie:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v':
                 if (options.verbosity < VerbosityLevel::Debug) {
@@ -634,12 +646,46 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
                 }
                 break;
             case 'h':
-                std::cout << "Usage: " << argv[0] << " [-v] [-vv] [-vvv] [--verbose] [--help] file1 [file2 ...]" << std::endl;
-                std::cout << "  -v, --verbose  Increase verbosity (can be used multiple times)" << std::endl;
-                std::cout << "  -h, --help     Display this help message" << std::endl;
+                std::cout << "Usage: " << argv[0] << " [OPTIONS] file1 [file2 ...]\n"
+                         << "Options:\n"
+                         << "  -v, --verbose     Increase verbosity (can be used multiple times)\n"
+                         << "  -s, --scan        Scan tape contents (default mode)\n"
+                         << "  -i, --init        Create JSON configuration template\n"
+                         << "  -e, --extract=FILE Extract files using JSON configuration\n"
+                         << "  -h, --help        Display this help message\n"
+                         << "\nModes:\n"
+                         << "  scan   - Examine tape contents without creating output\n"
+                         << "  init   - Create JSON template for later extraction\n"
+                         << "  extract - Extract files according to JSON configuration\n"
+                         << std::endl;
                 exit(0);
+            case 's':
+                if (mode_set) {
+                    std::cerr << "Error: Only one mode can be specified\n";
+                    exit(1);
+                }
+                options.mode = OperationMode::Scan;
+                mode_set = true;
+                break;
+            case 'i':
+                if (mode_set) {
+                    std::cerr << "Error: Only one mode can be specified\n";
+                    exit(1);
+                }
+                options.mode = OperationMode::Init;
+                mode_set = true;
+                break;
+            case 'e':
+                if (mode_set) {
+                    std::cerr << "Error: Only one mode can be specified\n";
+                    exit(1);
+                }
+                options.mode = OperationMode::Extract;
+                options.configFile = optarg;
+                mode_set = true;
+                break;
             default:
-                std::cerr << "Unknown option. Use --help for usage information." << std::endl;
+                std::cerr << "Unknown option. Use --help for usage information.\n";
                 exit(1);
         }
     }
@@ -650,7 +696,13 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
     }
 
     if (options.inputFiles.empty()) {
-        std::cerr << "Error: No input files specified. Use --help for usage information." << std::endl;
+        std::cerr << "Error: No input files specified. Use --help for usage information.\n";
+        exit(1);
+    }
+
+    // Validate options based on mode
+    if (options.mode == OperationMode::Extract && options.configFile.empty()) {
+        std::cerr << "Error: Extract mode requires a configuration file\n";
         exit(1);
     }
 }
@@ -660,36 +712,49 @@ int main(int argc, char* argv[]) {
     parseCommandLine(argc, argv, options);
 
     try {
-        for (const auto& inputFile : options.inputFiles) {
-            // Create our tape dumper
-            AwsTapeDumper tapeDumper(inputFile, options.verbosity);
+        switch (options.mode) {
+            case OperationMode::Scan:
+            case OperationMode::Init: {
+                for (const auto& inputFile : options.inputFiles) {
+                    AwsTapeDumper tapeDumper(inputFile, options.verbosity);
 
-            // Scan the tape to build table of contents
-            if (!tapeDumper.scanTape()) {
-                std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
-                continue;
-            }
+                    if (!tapeDumper.scanTape()) {
+                        std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
+                        continue;
+                    }
 
-            // Generate config filename from input filename
-            std::string configFile = inputFile + ".json";
-            tapeDumper.writeConfig(configFile);
+                    if (options.mode == OperationMode::Init) {
+                        std::string configFile = inputFile + ".json";
+                        tapeDumper.writeConfig(configFile);
+                        if (options.verbosity >= VerbosityLevel::Normal) {
+                            std::cout << "Configuration template written to: " << configFile << std::endl;
+                        }
+                    }
 
-            if (options.verbosity >= VerbosityLevel::Normal) {
-                std::cout << "Configuration written to: " << configFile << std::endl;
-            }
-
-            // Only show detailed file information at higher verbosity levels
-            if (options.verbosity >= VerbosityLevel::Detailed) {
-                auto files = tapeDumper.getFiles();
-                std::cout << "\nFiles found on tape " << inputFile << ":" << std::endl;
-                for (const auto& file : files) {
-                    std::cout << "  Dataset: " << file.datasetName << std::endl;
-                    std::cout << "    Record Format: " << file.recordFormat
-                             << " Block Attribute: " << file.blockAttribute << std::endl;
-                    std::cout << "    Block Size: " << file.blockSize
-                             << " Record Length: " << file.recordLength << std::endl;
-                    std::cout << "    Block Count: " << file.blockCount << std::endl;
+                    // Only show detailed information at higher verbosity levels
+                    if (options.verbosity >= VerbosityLevel::Detailed) {
+                        auto files = tapeDumper.getFiles();
+                        std::cout << "\nFiles found on tape " << inputFile << ":" << std::endl;
+                        for (const auto& file : files) {
+                            std::cout << "  Dataset: " << file.datasetName << std::endl;
+                            std::cout << "    Record Format: " << file.recordFormat
+                                     << " Block Attribute: " << file.blockAttribute << std::endl;
+                            std::cout << "    Block Size: " << file.blockSize
+                                     << " Record Length: " << file.recordLength << std::endl;
+                            std::cout << "    Block Count: " << file.blockCount << std::endl;
+                        }
+                    }
                 }
+                break;
+            }
+
+            case OperationMode::Extract: {
+                // TODO: Implement extraction mode
+                // 1. Load and validate JSON config
+                // 2. Create appropriate record processors
+                // 3. Extract files according to config
+                std::cout << "Extract mode not yet implemented" << std::endl;
+                break;
             }
         }
 
