@@ -544,12 +544,9 @@ void AwsTapeDumper::writeConfig(const std::string& filename) const {
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
     m_currentVolser = ebcdicToAsciiString(label.volumeSerial, 6);
 
-    if (m_verbosity >= VerbosityLevel::Normal) {
+    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "VOL1 Label found" << std::endl;
         std::cout << "  Volume Serial: " << m_currentVolser << std::endl;
-    }
-
-    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Owner Code: " << ebcdicToAsciiString(label.ownerCode, 10) << std::endl;
     }
 }
@@ -558,12 +555,9 @@ void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
     m_currentFile.datasetName = ebcdicToAsciiString(label.dataSetIdentifier, 17);
     m_currentFile.volumeSerial = ebcdicToAsciiString(label.dataSetSerialNumber, 6);
 
-    if (m_verbosity >= VerbosityLevel::Normal) {
+    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "HDR1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << m_currentFile.datasetName << std::endl;
-    }
-
-    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Dataset Serial Number: " << m_currentFile.volumeSerial << std::endl;
         std::cout << "  Volume Sequence Number: " << ebcdicToAsciiString(label.volumeSequenceNumber, 4) << std::endl;
         std::cout << "  Dataset Sequence Number: " << ebcdicToAsciiString(label.dataSetSequenceNumber, 4) << std::endl;
@@ -583,13 +577,10 @@ void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
     m_currentFile.blockSize = std::stoi(blksize);
     m_currentFile.recordLength = std::stoi(lrecl);
 
-    if (m_verbosity >= VerbosityLevel::Normal) {
+    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "HDR2 Label found" << std::endl;
         std::cout << "  Record Format: " << m_currentFile.recordFormat << std::endl;
         std::cout << "  Block Attribute: " << m_currentFile.blockAttribute << std::endl;
-    }
-
-    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Block Length: " << m_currentFile.blockSize << std::endl;
         std::cout << "  Record Length: " << m_currentFile.recordLength << std::endl;
         std::cout << "  Tape Density: " << ebcdicToAsciiTable[label.tapeDensity] << std::endl;
@@ -601,12 +592,9 @@ void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
 }
 
 void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
-    if (m_verbosity >= VerbosityLevel::Normal) {
+    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << ebcdicToAsciiString(label.dataSetIdentifier, 17) << std::endl;
-    }
-
-    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::string blockCount = ebcdicToAsciiString(label.blockCount, 6);
         m_currentFile.blockCount = std::stoi(blockCount);
         std::cout << "  Block Count: " << m_currentFile.blockCount << std::endl;
@@ -614,13 +602,10 @@ void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
 }
 
 void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
-    if (m_verbosity >= VerbosityLevel::Normal) {
+    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF2 Label found" << std::endl;
         std::cout << "  Record Format: " << ebcdicToAsciiTable[label.recordFormat] << std::endl;
         std::cout << "  Block Attribute: " << ebcdicToAsciiTable[label.blockAttribute] << std::endl;
-    }
-
-    if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Block Length: " << ebcdicToAsciiString(label.blockLength, 5) << std::endl;
         std::cout << "  Record Length: " << ebcdicToAsciiString(label.recordLength, 5) << std::endl;
         std::cout << "  Tape Density: " << ebcdicToAsciiTable[label.tapeDensity] << std::endl;
