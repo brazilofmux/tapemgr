@@ -729,51 +729,78 @@ private:
         if (m_verbosity >= VerbosityLevel::Normal) {
             std::cout << "  Writing data blocks" << std::endl;
         }
-        std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
+        std::ifstream inFile(config.inputFile, std::ios::binary);
         RecordBlockBuilder blockBuilder(config, m_verbosity);
-        std::vector<uint8_t> record(config.lrecl);
 
         if (config.binary) {
-            while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
-                auto completeBlocks = blockBuilder.addRecord(record);
-                for (const auto& block : completeBlocks) {
-                    writeBlock(block, 0xA0);
-                    m_blockCount++;
+            if (config.recordFormat == 'V') {
+                size_t recordCount = 0;  // Track records for this file
+                while (inFile) {
+                    // Read RDW
+                    uint8_t rdw[4];
+                    if (!inFile.read(reinterpret_cast<char*>(rdw), 4)) {
+                        break;  // End of file
+                    }
+
+                    // Get record length from RDW (includes RDW size)
+                    uint16_t recordLength = (rdw[0] << 8) | rdw[1];
+                    if (recordLength < 4) {
+                        throw std::runtime_error("Invalid RDW length in binary VB file");
+                    }
+
+                    // Read record data
+                    std::vector<uint8_t> record(recordLength);
+                    std::copy(rdw, rdw + 4, record.begin());
+                    if (!inFile.read(reinterpret_cast<char*>(record.data() + 4), recordLength - 4)) {
+                        throw std::runtime_error("Unexpected end of file while reading VB record");
+                    }
+
+                    auto completeBlocks = blockBuilder.addRecord(record);
+                    for (const auto& block : completeBlocks) {
+                        writeBlock(block, 0xA0);
+                        m_blockCount++;
+                    }
+                    recordCount++;
                 }
+                config.recordCount = recordCount;
             }
         } else {
+            // Handle text format - existing code
             std::string line;
             while (std::getline(inFile, line)) {
-                // Remove Windows-style line ending if present
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-
-                // Trim trailing spaces for variable records
-                if (config.recordFormat == 'V') {
-                    while (!line.empty() && std::isspace(line.back())) {
+                std::string line;
+                while (std::getline(inFile, line)) {
+                    // Remove Windows-style line ending if present
+                    if (!line.empty() && line.back() == '\r') {
                         line.pop_back();
                     }
-                }
 
-                auto ebcdicData = utf8ToEbcdic(line);
+                    // Trim trailing spaces for variable records
+                    if (config.recordFormat == 'V') {
+                        while (!line.empty() && std::isspace(line.back())) {
+                            line.pop_back();
+                        }
+                    }
 
-                // For variable records, use actual length
-                // For fixed records, pad to LRECL
-                std::vector<uint8_t> record;
-                if (config.recordFormat == 'V') {
-                    record = ebcdicData;  // Use exact length
-                } else {
-                    record.assign(config.lrecl, 0x40);  // Pad fixed records
-                    std::copy(ebcdicData.begin(),
-                             ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
-                             record.begin());
-                }
+                    auto ebcdicData = utf8ToEbcdic(line);
 
-                auto completeBlocks = blockBuilder.addRecord(record);
-                for (const auto& block : completeBlocks) {
-                    writeBlock(block, 0xA0);
-                    m_blockCount++;
+                    // For variable records, use actual length
+                    // For fixed records, pad to LRECL
+                    std::vector<uint8_t> record;
+                    if (config.recordFormat == 'V') {
+                        record = ebcdicData;  // Use exact length
+                    } else {
+                        record.assign(config.lrecl, 0x40);  // Pad fixed records
+                        std::copy(ebcdicData.begin(),
+                                 ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
+                                 record.begin());
+                    }
+
+                    auto completeBlocks = blockBuilder.addRecord(record);
+                    for (const auto& block : completeBlocks) {
+                        writeBlock(block, 0xA0);
+                        m_blockCount++;
+                    }
                 }
             }
         }
@@ -784,11 +811,7 @@ private:
             writeBlock(finalBlock, 0xA0);
             m_blockCount++;
         }
-
-        // Store the actual record count
-        config.recordCount = blockBuilder.getRecordCount();
     }
-
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
         std::cout << "  Writing EOF1 and EOF2 labels" << std::endl;
