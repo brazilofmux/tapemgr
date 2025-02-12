@@ -39,22 +39,12 @@ struct ProgramOptions {
     std::vector<std::string> inputFiles;
 };
 
-// Define constants
-constexpr int MAX_BLOCK_SIZE = 65535;
-constexpr int STANDARD_LABEL_LENGTH = 80;
-
 // Define structs
 struct AwsTapeBlockHeader {
     uint16_t curblkl;
     uint16_t prvblkl;
     uint8_t flags1;
     uint8_t flags2;
-};
-
-// Define enums
-enum class PrintOption {
-    Summary,
-    Detail
 };
 
 struct VOL1Label {
@@ -112,37 +102,6 @@ using EOV1Label = HDR1Label;
 // EOF2 and EOV2 have the same structure as HDR2
 using EOF2Label = HDR2Label;
 using EOV2Label = HDR2Label;
-
-struct BlockDescriptorWord {
-    unsigned char length_high;
-    unsigned char length_low;
-    unsigned char reserved_high;
-    unsigned char reserved_low;
-
-    uint16_t getLength() const {
-        return (length_high << 8) | length_low;
-    }
-
-    uint16_t getReserved() const {
-        return (reserved_high << 8) | reserved_low;
-    }
-};
-
-// SDW/RDW structure definitions
-struct RecordDescriptor {
-    uint8_t length_hi;   // High byte of length
-    uint8_t length_lo;   // Low byte of length
-    uint8_t flags;       // Flags including segment control bits
-    uint8_t reserved;    // Reserved field
-};
-
-// Segment control codes (in rightmost 2 bits of flags byte)
-enum class SegmentCode {
-    CompleteRecord = 0b00,  // Complete logical record
-    FirstSegment   = 0b01,  // First segment of multi-segment record
-    LastSegment    = 0b10,  // Last segment of multi-segment record
-    MiddleSegment  = 0b11   // Middle segment of multi-segment record
-};
 
 // EBCDIC to ASCII conversion table
 const unsigned char ebcdicToAsciiTable[] = {
