@@ -407,7 +407,7 @@ private:
             initializeNewBlock();
         }
 
-        // Core logic remains the same - copy record into current block
+        // Copy the data
         if (record.size() > 0) {
             std::copy(record.begin(), record.end(),
                      m_currentBlock.begin() + m_currentBlockOffset);
@@ -416,14 +416,7 @@ private:
         m_currentBlockOffset += record.size();
         m_recordCount++;
 
-        // For unblocked (F), always finish block after record
-        if (!isBlocked) {
-            finishCurrentBlock();
-            completeBlocks.push_back(m_currentBlock);
-            initializeNewBlock();
-        }
-        // For blocked (FB), only finish block if full
-        else if (m_currentBlockOffset == m_config.blksize) {
+        if (!isBlocked || m_currentBlockOffset == m_config.blksize) {
             finishCurrentBlock();
             completeBlocks.push_back(m_currentBlock);
             initializeNewBlock();
@@ -732,9 +725,9 @@ private:
         std::ifstream inFile(config.inputFile, std::ios::binary);
         RecordBlockBuilder blockBuilder(config, m_verbosity);
 
+        size_t recordCount = 0;
         if (config.binary) {
             if (config.recordFormat == 'V') {
-                size_t recordCount = 0;  // Track records for this file
                 while (inFile) {
                     // Read RDW
                     uint8_t rdw[4];
@@ -762,48 +755,57 @@ private:
                     }
                     recordCount++;
                 }
-                config.recordCount = recordCount;
-            }
-        } else {
-            // Handle text format - existing code
-            std::string line;
-            while (std::getline(inFile, line)) {
-                std::string line;
-                while (std::getline(inFile, line)) {
-                    // Remove Windows-style line ending if present
-                    if (!line.empty() && line.back() == '\r') {
-                        line.pop_back();
-                    }
-
-                    // Trim trailing spaces for variable records
-                    if (config.recordFormat == 'V') {
-                        while (!line.empty() && std::isspace(line.back())) {
-                            line.pop_back();
-                        }
-                    }
-
-                    auto ebcdicData = utf8ToEbcdic(line);
-
-                    // For variable records, use actual length
-                    // For fixed records, pad to LRECL
-                    std::vector<uint8_t> record;
-                    if (config.recordFormat == 'V') {
-                        record = ebcdicData;  // Use exact length
-                    } else {
-                        record.assign(config.lrecl, 0x40);  // Pad fixed records
-                        std::copy(ebcdicData.begin(),
-                                 ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
-                                 record.begin());
-                    }
-
+            } else {
+#if 0
+                while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
                     auto completeBlocks = blockBuilder.addRecord(record);
                     for (const auto& block : completeBlocks) {
                         writeBlock(block, 0xA0);
                         m_blockCount++;
                     }
+                    recordCount++;
                 }
+#endif
+            }
+        } else {
+            // Handle text format - existing code
+            std::string line;
+            while (std::getline(inFile, line)) {
+                // Remove Windows-style line ending if present
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+
+                // Trim trailing spaces for variable records
+                if (config.recordFormat == 'V') {
+                    while (!line.empty() && std::isspace(line.back())) {
+                        line.pop_back();
+                    }
+                }
+
+                auto ebcdicData = utf8ToEbcdic(line);
+
+                // For variable records, use actual length
+                // For fixed records, pad to LRECL
+                std::vector<uint8_t> record;
+                if (config.recordFormat == 'V') {
+                    record = ebcdicData;  // Use exact length
+                } else {
+                    record.assign(config.lrecl, 0x40);  // Pad fixed records
+                    std::copy(ebcdicData.begin(),
+                             ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
+                             record.begin());
+                }
+
+                auto completeBlocks = blockBuilder.addRecord(record);
+                for (const auto& block : completeBlocks) {
+                    writeBlock(block, 0xA0);
+                    m_blockCount++;
+                }
+                recordCount++;
             }
         }
+        config.recordCount = recordCount;
 
         // Handle any remaining partial block
         auto finalBlock = blockBuilder.flush();
@@ -925,25 +927,23 @@ bool validateAndFixupRecordFormat(FileConfig& config) {
     // For fixed-length records (F or FB)
     if (config.recordFormat == 'F') {
         // Case 1: F format - LRECL should equal BLKSIZE
-        if (config.blksize != config.lrecl) {
-            std::cout << "Warning: For file " << config.inputFile
-                      << " (F format), BLKSIZE (" << config.blksize
-                      << ") differs from LRECL (" << config.lrecl << ")" << std::endl;
+        bool isBlocked = config.recfm.find('B') != std::string::npos;
 
-            if (config.blksize > config.lrecl) {
-                // If BLKSIZE is an exact multiple of LRECL, suggest FB
-                if (config.blksize % config.lrecl == 0) {
-                    std::cout << "  Suggestion: Change format to FB to block "
-                              << (config.blksize / config.lrecl)
-                              << " records per block" << std::endl;
-                    std::cout << "  Or set BLKSIZE=" << config.lrecl
-                              << " to maintain F format" << std::endl;
-                } else {
-                    std::cout << "  Setting BLKSIZE=" << config.lrecl
-                              << " to match F format requirements" << std::endl;
-                    config.blksize = config.lrecl;
-                }
-            } else {
+        if (isBlocked) {
+            // FB format - just verify BLKSIZE is multiple of LRECL
+            if (config.blksize % config.lrecl != 0) {
+                std::cout << "Error: For file " << config.inputFile
+                          << " (FB format), BLKSIZE (" << config.blksize
+                          << ") must be a multiple of LRECL (" << config.lrecl
+                          << ")" << std::endl;
+                return false;
+            }
+        } else {
+            // F format - LRECL must equal BLKSIZE
+            if (config.blksize != config.lrecl) {
+                std::cout << "Warning: For file " << config.inputFile
+                          << " (F format), BLKSIZE (" << config.blksize
+                          << ") doesn't match LRECL (" << config.lrecl << ")" << std::endl;
                 std::cout << "  Setting BLKSIZE=" << config.lrecl
                           << " to match F format requirements" << std::endl;
                 config.blksize = config.lrecl;
