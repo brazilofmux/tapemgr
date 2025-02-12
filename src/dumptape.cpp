@@ -157,6 +157,577 @@ void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     }
 }
 
+// Block reading abstraction
+class BlockReader {
+public:
+    virtual ~BlockReader() = default;
+
+    // Read next block from tape
+    virtual bool readNextBlock(std::vector<uint8_t>& blockData) = 0;
+
+    // Get current block's properties
+    virtual uint16_t getBlockSize() const = 0;
+    virtual bool isDataBlock() const = 0;
+    virtual bool isTapeMark() const = 0;
+
+protected:
+    BlockReader() = default;
+};
+
+// AWS tape-specific block reader
+class AwsBlockReader : public BlockReader {
+public:
+    explicit AwsBlockReader(std::ifstream& tapeFile) : m_tapeFile(tapeFile) {}
+
+    bool readNextBlock(std::vector<uint8_t>& blockData) override {
+        AwsTapeBlockHeader header;
+        m_tapeFile.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (m_tapeFile.eof()) {
+            return false;
+        }
+
+        m_currentHeader = header;
+
+        if (header.curblkl > 0) {
+            blockData.resize(header.curblkl);
+            m_tapeFile.read(reinterpret_cast<char*>(blockData.data()), header.curblkl);
+            return !m_tapeFile.eof();
+        } else {
+            blockData.clear();
+            return true;
+        }
+    }
+
+    uint16_t getBlockSize() const override { return m_currentHeader.curblkl; }
+    bool isDataBlock() const override { return !(m_currentHeader.flags1 & 0x40); }
+    bool isTapeMark() const override { return (m_currentHeader.flags1 & 0x40); }
+
+private:
+    std::ifstream& m_tapeFile;
+    AwsTapeBlockHeader m_currentHeader{};
+};
+
+// Record Processing interface
+class RecordProcessor {
+public:
+    virtual ~RecordProcessor() = default;
+
+    // Process a block and extract records
+    virtual std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) = 0;
+
+    // Flush any remaining records (e.g., for spanned records crossing blocks)
+    virtual std::vector<std::vector<uint8_t>> flush() = 0;
+
+protected:
+    RecordProcessor() = default;
+};
+
+// Fixed Record Processor
+class FixedRecordProcessor : public RecordProcessor {
+public:
+    explicit FixedRecordProcessor(uint16_t recordLength) : m_recordLength(recordLength) {}
+
+    std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
+        std::vector<std::vector<uint8_t>> records;
+
+        // For fixed records, use the entire block - no BDW
+        for (size_t offset = 0; offset < blockData.size(); offset += m_recordLength) {
+            if (offset + m_recordLength > blockData.size()) {
+                throw std::runtime_error("Incomplete record at end of block");
+            }
+            std::vector<uint8_t> record(blockData.begin() + offset,
+                                      blockData.begin() + offset + m_recordLength);
+            records.push_back(std::move(record));
+        }
+
+        return records;
+    }
+
+    std::vector<std::vector<uint8_t>> flush() override {
+        return {}; // Fixed records don't span blocks
+    }
+
+private:
+    uint16_t m_recordLength;
+};
+
+// Variable Record Processor
+class VariableRecordProcessor : public RecordProcessor {
+public:
+    VariableRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
+
+    std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
+        std::vector<std::vector<uint8_t>> records;
+
+        // Skip BDW (first 4 bytes of block)
+        size_t offset = 4;
+
+        while (offset < blockData.size()) {
+            // Get RDW
+            if (offset + 4 > blockData.size()) {
+                throw std::runtime_error("Incomplete RDW at end of block");
+            }
+
+            // Extract record length from RDW
+            uint16_t recordLength = (blockData[offset] << 8) | blockData[offset + 1];
+            if (recordLength < 4) {
+                throw std::runtime_error("Invalid RDW length");
+            }
+
+            // Validate record fits in block
+            if (offset + recordLength > blockData.size()) {
+                throw std::runtime_error("Record extends beyond block boundary");
+            }
+
+            // Extract the complete record (including RDW)
+            std::vector<uint8_t> record(blockData.begin() + offset,
+                                      blockData.begin() + offset + recordLength);
+            records.push_back(std::move(record));
+
+            offset += recordLength;
+        }
+
+        return records;
+    }
+
+    std::vector<std::vector<uint8_t>> flush() override {
+        return {}; // Variable records don't span blocks
+    }
+
+private:
+    uint16_t m_maxRecordLength;
+};
+
+// Spanned Record Processor
+class SpannedRecordProcessor : public RecordProcessor {
+public:
+    SpannedRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
+
+    std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
+        std::vector<std::vector<uint8_t>> completeRecords;
+
+        // Skip BDW
+        size_t offset = 4;
+
+        while (offset < blockData.size()) {
+            // Get SDW
+            if (offset + 4 > blockData.size()) {
+                throw std::runtime_error("Incomplete SDW at end of block");
+            }
+
+            // Extract segment length and control information from SDW
+            uint16_t segmentLength = (blockData[offset] << 8) | blockData[offset + 1];
+            uint8_t segmentControl = blockData[offset + 2] & 0x03;
+
+            if (segmentLength < 4) {
+                throw std::runtime_error("Invalid SDW length");
+            }
+
+            // Validate segment fits in block
+            if (offset + segmentLength > blockData.size()) {
+                throw std::runtime_error("Segment extends beyond block boundary");
+            }
+
+            // Process segment based on control bits
+            processSegment(blockData, offset + 4, segmentLength - 4, segmentControl, completeRecords);
+
+            offset += segmentLength;
+        }
+
+        return completeRecords;
+    }
+
+    std::vector<std::vector<uint8_t>> flush() override {
+        std::vector<std::vector<uint8_t>> records;
+
+        // If we have a partial record and we're flushing, something went wrong
+        if (!m_currentRecord.empty()) {
+            throw std::runtime_error("Incomplete spanned record at end of file");
+        }
+
+        return records;
+    }
+
+private:
+    void processSegment(const std::vector<uint8_t>& blockData, size_t offset, size_t length,
+                       uint8_t segmentControl, std::vector<std::vector<uint8_t>>& completeRecords) {
+        switch (segmentControl) {
+            case 0b00: // Complete logical record
+                completeRecords.push_back(std::vector<uint8_t>(
+                    blockData.begin() + offset,
+                    blockData.begin() + offset + length));
+                break;
+
+            case 0b01: // First segment
+                if (!m_currentRecord.empty()) {
+                    throw std::runtime_error("First segment received while processing previous record");
+                }
+                m_currentRecord.insert(m_currentRecord.end(),
+                                     blockData.begin() + offset,
+                                     blockData.begin() + offset + length);
+                break;
+
+            case 0b10: // Last segment
+                if (m_currentRecord.empty()) {
+                    throw std::runtime_error("Last segment received without first segment");
+                }
+                m_currentRecord.insert(m_currentRecord.end(),
+                                     blockData.begin() + offset,
+                                     blockData.begin() + offset + length);
+                completeRecords.push_back(std::move(m_currentRecord));
+                m_currentRecord.clear();
+                break;
+
+            case 0b11: // Middle segment
+                if (m_currentRecord.empty()) {
+                    throw std::runtime_error("Middle segment received without first segment");
+                }
+                m_currentRecord.insert(m_currentRecord.end(),
+                                     blockData.begin() + offset,
+                                     blockData.begin() + offset + length);
+                break;
+
+            default:
+                throw std::runtime_error("Invalid segment control code");
+        }
+    }
+
+    uint16_t m_maxRecordLength;
+    std::vector<uint8_t> m_currentRecord;
+};
+
+// Update factory to include new processors
+class RecordProcessorFactory {
+public:
+    static std::unique_ptr<RecordProcessor> create(const json& fileConfig) {
+        std::string recfm = fileConfig["record_format"];
+        int recordLength = fileConfig["record_length"];
+
+        if (recfm == "F" || recfm == "FB") {
+            return std::make_unique<FixedRecordProcessor>(recordLength);
+        }
+        if (recfm == "V" || recfm == "VB") {
+            return std::make_unique<VariableRecordProcessor>(recordLength);
+        }
+        if (recfm == "VS" || recfm == "VBS") {
+            return std::make_unique<SpannedRecordProcessor>(recordLength);
+        }
+
+        throw std::runtime_error("Unsupported record format: " + recfm);
+    }
+};
+
+// Record Transformation interface
+class RecordTransformer {
+public:
+    virtual ~RecordTransformer() = default;
+    virtual std::vector<uint8_t> transform(const std::vector<uint8_t>& record) = 0;
+protected:
+    RecordTransformer() = default;
+};
+
+// Text record transformer (EBCDIC to UTF-8 with trimming)
+class TextRecordTransformer : public RecordTransformer {
+public:
+    std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
+        // For variable/spanned records, skip the RDW/SDW
+        const uint8_t* dataStart = record.data();
+        size_t dataLength = record.size();
+
+        if (record.size() >= 4 && (record[2] & 0x03) != 0) {  // Has SDW/RDW
+            dataStart += 4;
+            dataLength -= 4;
+        }
+
+        // Convert EBCDIC to ASCII and trim trailing spaces
+        std::string ascii = ebcdicToAsciiString(dataStart, dataLength);
+        while (!ascii.empty() && ascii.back() == ' ') {
+            ascii.pop_back();
+        }
+
+        // Convert to vector<uint8_t> and add newline
+        std::vector<uint8_t> result(ascii.begin(), ascii.end());
+        result.push_back('\n');
+        return result;
+    }
+};
+
+// Binary record transformer (pass-through with optional RDW handling)
+class BinaryRecordTransformer : public RecordTransformer {
+public:
+    explicit BinaryRecordTransformer(bool stripDescriptors = false)
+        : m_stripDescriptors(stripDescriptors) {}
+
+    std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
+        if (!m_stripDescriptors) {
+            return record;  // Pass through unchanged
+        }
+
+        // Strip RDW/SDW if present
+        if (record.size() >= 4 && (record[2] & 0x03) != 0) {
+            return std::vector<uint8_t>(record.begin() + 4, record.end());
+        }
+        return record;
+    }
+
+private:
+    bool m_stripDescriptors;
+};
+
+// Factory for creating appropriate transformers
+class RecordTransformerFactory {
+public:
+    static std::unique_ptr<RecordTransformer> create(const json& fileConfig) {
+        bool isBinary = fileConfig.value("binary", false);
+
+        if (isBinary) {
+            // For variable formats, we might want to strip RDW/SDW
+            bool stripDescriptors = fileConfig["record_format"].get<std::string>()[0] == 'V';
+            return std::make_unique<BinaryRecordTransformer>(stripDescriptors);
+        } else {
+            return std::make_unique<TextRecordTransformer>();
+        }
+    }
+};
+
+// Output Writer interface
+class OutputWriter {
+public:
+    virtual ~OutputWriter() = default;
+    virtual void writeRecord(const std::vector<uint8_t>& record) = 0;
+    virtual void close() = 0;
+
+protected:
+    OutputWriter() = default;
+};
+
+// Text file writer (handles UTF-8 with newlines)
+class TextOutputWriter : public OutputWriter {
+public:
+    explicit TextOutputWriter(const std::string& filename) {
+        m_outFile.open(filename, std::ios::out | std::ios::binary);
+        if (!m_outFile) {
+            throw std::runtime_error("Unable to open output file: " + filename);
+        }
+    }
+
+    void writeRecord(const std::vector<uint8_t>& record) override {
+        m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
+        // Note: newline should already be added by TextRecordTransformer
+    }
+
+    void close() override {
+        if (m_outFile.is_open()) {
+            m_outFile.close();
+        }
+    }
+
+private:
+    std::ofstream m_outFile;
+};
+
+// Fixed binary writer (validates record length)
+class FixedBinaryWriter : public OutputWriter {
+public:
+    FixedBinaryWriter(const std::string& filename, uint16_t recordLength)
+        : m_recordLength(recordLength) {
+        m_outFile.open(filename, std::ios::out | std::ios::binary);
+        if (!m_outFile) {
+            throw std::runtime_error("Unable to open output file: " + filename);
+        }
+    }
+
+    void writeRecord(const std::vector<uint8_t>& record) override {
+        if (record.size() != m_recordLength) {
+            throw std::runtime_error("Record length mismatch in fixed binary output. "
+                                   "Expected: " + std::to_string(m_recordLength) +
+                                   ", Got: " + std::to_string(record.size()));
+        }
+        m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
+    }
+
+    void close() override {
+        if (m_outFile.is_open()) {
+            m_outFile.close();
+        }
+    }
+
+private:
+    std::ofstream m_outFile;
+    uint16_t m_recordLength;
+};
+
+// Variable binary writer (adds RDW if needed)
+class VariableBinaryWriter : public OutputWriter {
+public:
+    VariableBinaryWriter(const std::string& filename, bool addRDW = false)
+        : m_addRDW(addRDW) {
+        m_outFile.open(filename, std::ios::out | std::ios::binary);
+        if (!m_outFile) {
+            throw std::runtime_error("Unable to open output file: " + filename);
+        }
+    }
+
+    void writeRecord(const std::vector<uint8_t>& record) override {
+        if (m_addRDW) {
+            // Add RDW if record doesn't already have one
+            if (record.size() < 4 || (record[2] & 0x03) == 0) {
+                std::vector<uint8_t> withRDW(record.size() + 4);
+                // Set RDW
+                uint16_t totalLength = record.size() + 4;
+                withRDW[0] = totalLength >> 8;
+                withRDW[1] = totalLength & 0xFF;
+                withRDW[2] = 0;  // Flags
+                withRDW[3] = 0;  // Reserved
+                // Copy record data
+                std::copy(record.begin(), record.end(), withRDW.begin() + 4);
+                m_outFile.write(reinterpret_cast<const char*>(withRDW.data()), withRDW.size());
+            } else {
+                // Record already has RDW/SDW
+                m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
+            }
+        } else {
+            // Pass through without adding RDW
+            m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
+        }
+    }
+
+    void close() override {
+        if (m_outFile.is_open()) {
+            m_outFile.close();
+        }
+    }
+
+private:
+    std::ofstream m_outFile;
+    bool m_addRDW;
+};
+
+// Factory for creating appropriate output writers
+class OutputWriterFactory {
+public:
+    static std::unique_ptr<OutputWriter> create(const json& fileConfig, const std::string& outputPath) {
+        std::string recfm = fileConfig["record_format"];
+        bool isBinary = fileConfig.value("binary", false);
+
+        if (!isBinary) {
+            return std::make_unique<TextOutputWriter>(outputPath);
+        }
+
+        // Binary output handling
+        if (recfm[0] == 'F') {
+            return std::make_unique<FixedBinaryWriter>(outputPath,
+                                                     fileConfig["record_length"]);
+        }
+
+        if (recfm[0] == 'V') {
+            // Determine if we need to add RDWs
+            // If the record processor or transformer is configured to strip RDWs,
+            // we need to add them back for the output file
+            bool addRDW = fileConfig.value("strip_rdw", false);
+            return std::make_unique<VariableBinaryWriter>(outputPath, addRDW);
+        }
+
+        throw std::runtime_error("Unsupported output format for record format: " + recfm);
+    }
+};
+
+// Extraction Pipeline class to coordinate the components
+class ExtractionPipeline {
+public:
+    ExtractionPipeline(std::ifstream& tapeFile, const json& fileConfig,
+                      VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_verbosity(verbosity) {
+        // Create all components of the pipeline
+        m_blockReader = std::make_unique<AwsBlockReader>(tapeFile);
+        m_recordProcessor = RecordProcessorFactory::create(fileConfig);
+        m_recordTransformer = RecordTransformerFactory::create(fileConfig);
+
+        // Create output writer
+        std::string outputPath = fileConfig["local_file"].get<std::string>();
+        if (outputPath.empty()) {
+            throw std::runtime_error("No output file specified in configuration");
+        }
+        m_outputWriter = OutputWriterFactory::create(fileConfig, outputPath);
+
+        if (m_verbosity >= VerbosityLevel::Detailed) {
+            std::cout << "Extraction pipeline created for dataset: "
+                     << fileConfig["dataset_name"].get<std::string>() << std::endl;
+            std::cout << "  Output file: " << outputPath << std::endl;
+        }
+    }
+
+    ~ExtractionPipeline() {
+        if (m_outputWriter) {
+            m_outputWriter->close();
+        }
+    }
+
+    // Run the extraction process
+    void extract() {
+        std::vector<uint8_t> blockData;
+        size_t blockCount = 0;
+        size_t recordCount = 0;
+
+        while (m_blockReader->readNextBlock(blockData)) {
+            if (m_blockReader->isTapeMark()) {
+                if (m_verbosity >= VerbosityLevel::Debug) {
+                    std::cout << "Found tape mark, ending extraction" << std::endl;
+                }
+                break;
+            }
+
+            if (!m_blockReader->isDataBlock() || blockData.empty()) {
+                continue;
+            }
+
+            blockCount++;
+            if (m_verbosity >= VerbosityLevel::Debug) {
+                std::cout << "Processing block " << blockCount
+                         << " (size: " << blockData.size() << " bytes)" << std::endl;
+            }
+
+            try {
+                // Process block into records
+                auto records = m_recordProcessor->processBlock(blockData);
+
+                // Transform and write each record
+                for (const auto& record : records) {
+                    auto transformedRecord = m_recordTransformer->transform(record);
+                    m_outputWriter->writeRecord(transformedRecord);
+                    recordCount++;
+                }
+
+            } catch (const std::exception& e) {
+                std::cerr << "Error processing block " << blockCount << ": "
+                         << e.what() << std::endl;
+                throw;
+            }
+        }
+
+        // Handle any remaining records (e.g., from spanned record processing)
+        auto finalRecords = m_recordProcessor->flush();
+        for (const auto& record : finalRecords) {
+            auto transformedRecord = m_recordTransformer->transform(record);
+            m_outputWriter->writeRecord(transformedRecord);
+            recordCount++;
+        }
+
+        if (m_verbosity >= VerbosityLevel::Normal) {
+            std::cout << "Extraction complete: " << std::endl
+                     << "  Blocks processed: " << blockCount << std::endl
+                     << "  Records extracted: " << recordCount << std::endl;
+        }
+    }
+
+private:
+    VerbosityLevel m_verbosity;
+    std::unique_ptr<BlockReader> m_blockReader;
+    std::unique_ptr<RecordProcessor> m_recordProcessor;
+    std::unique_ptr<RecordTransformer> m_recordTransformer;
+    std::unique_ptr<OutputWriter> m_outputWriter;
+};
+
 class AwsTapeDumper {
 public:
     AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbosity = VerbosityLevel::Normal);
@@ -183,6 +754,9 @@ public:
 
     // Config loading
     static json loadConfig(const std::string& filename, std::string& error);
+
+    void extractFile(const json& config);
+    bool extractFiles(const json& config);
 
 private:
     // Internal processing methods
@@ -523,6 +1097,9 @@ json AwsTapeDumper::generateConfig() const {
         fileObj["block_count"] = file.blockCount;
         fileObj["binary"] = false;  // Default to false, user can modify
 
+        // Store file position as int64_t
+        fileObj["file_position"] = static_cast<int64_t>(file.dataStart);
+
         files.push_back(fileObj);
     }
     config["files"] = files;
@@ -685,6 +1262,21 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
             if (!validateDate(file, "creation_date") || !validateDate(file, "expiration_date")) {
                 return false;
             }
+
+            // Validate file_position if present (required for extraction)
+            if (!file.contains("file_position")) {
+                error = "Missing required field 'file_position' in file entry";
+                return false;
+            }
+            if (!file["file_position"].is_number_integer()) {
+                error = "Field 'file_position' must be an integer";
+                return false;
+            }
+            // Allow only non-negative file positions
+            if (file["file_position"].get<int64_t>() < 0) {
+                error = "Field 'file_position' must be non-negative";
+                return false;
+            }
         }
 
         return true;
@@ -801,6 +1393,56 @@ void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
     }
 }
 
+// In extractFile, when retrieving file position:
+void AwsTapeDumper::extractFile(const json& fileConfig) {
+    m_tapeFile.clear();
+
+    // Convert int64_t to streampos
+    auto fileStart = static_cast<std::streampos>(fileConfig["file_position"].get<int64_t>());
+    m_tapeFile.seekg(fileStart);
+
+    if (m_verbosity >= VerbosityLevel::Normal) {
+        std::cout << "Extracting dataset: " << fileConfig["dataset_name"] << std::endl;
+    }
+
+    ExtractionPipeline pipeline(m_tapeFile, fileConfig, m_verbosity);
+    pipeline.extract();
+}
+
+// Update AwsTapeDumper to support extraction mode
+bool AwsTapeDumper::extractFiles(const json& config) {
+    if (!config.contains("files") || !config["files"].is_array()) {
+        throw std::runtime_error("Invalid configuration: missing files array");
+    }
+
+    bool success = true;
+    for (const auto& fileConfig : config["files"]) {
+        try {
+            if (fileConfig["local_file"].empty()) {
+                if (m_verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "Skipping dataset " << fileConfig["dataset_name"]
+                             << " (no output file specified)" << std::endl;
+                }
+                continue;
+            }
+
+            extractFile(fileConfig);
+
+        } catch (const std::exception& e) {
+            std::cerr << "Error extracting dataset " << fileConfig["dataset_name"]
+                     << ": " << e.what() << std::endl;
+            success = false;
+            if (m_verbosity >= VerbosityLevel::Detailed) {
+                // Continue with other files in detailed mode
+                continue;
+            }
+            break;
+        }
+    }
+
+    return success;
+}
+
 enum class OperationMode {
     Scan,       // Just examine the tape
     Init,       // Create JSON template
@@ -897,6 +1539,7 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
     }
 }
 
+// Updated main function
 int main(int argc, char* argv[]) {
     ProgramOptions options;
     parseCommandLine(argc, argv, options);
@@ -921,10 +1564,8 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    // Only show detailed information at higher verbosity levels
                     if (options.verbosity >= VerbosityLevel::Detailed) {
                         auto files = tapeDumper.getFiles();
-                        std::cout << "\nFiles found on tape " << inputFile << ":" << std::endl;
                         for (const auto& file : files) {
                             std::cout << "  Dataset: " << file.datasetName << std::endl;
                             std::cout << "    Record Format: " << file.recordFormat
@@ -939,6 +1580,11 @@ int main(int argc, char* argv[]) {
             }
 
             case OperationMode::Extract: {
+                if (options.inputFiles.size() != 1) {
+                    std::cerr << "Error: Extract mode requires exactly one input tape file" << std::endl;
+                    return 1;
+                }
+
                 std::string error;
                 json config = AwsTapeDumper::loadConfig(options.configFile, error);
                 if (config.is_null()) {
@@ -946,13 +1592,15 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
 
-                if (options.verbosity >= VerbosityLevel::Normal) {
-                    std::cout << "Configuration validated successfully." << std::endl;
-                    std::cout << "Found " << config["files"].size() << " files to extract." << std::endl;
+                AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity);
+                if (!tapeDumper.extractFiles(config)) {
+                    std::cerr << "Error: Some files failed to extract" << std::endl;
+                    return 1;
                 }
 
-                // TODO: Proceed with extraction using validated config
-                std::cout << "Extract mode validation complete. Extraction not yet implemented." << std::endl;
+                if (options.verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "All files extracted successfully" << std::endl;
+                }
                 break;
             }
         }
