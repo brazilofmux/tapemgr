@@ -255,45 +255,45 @@ private:
 class VariableRecordProcessor : public RecordProcessor {
 public:
     VariableRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
-
+    
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> records;
-
+        
         // Skip BDW (first 4 bytes of block)
         size_t offset = 4;
-
+        
         while (offset < blockData.size()) {
             // Get RDW
             if (offset + 4 > blockData.size()) {
                 throw std::runtime_error("Incomplete RDW at end of block");
             }
-
+            
             // Extract record length from RDW
             uint16_t recordLength = (blockData[offset] << 8) | blockData[offset + 1];
             if (recordLength < 4) {
                 throw std::runtime_error("Invalid RDW length");
             }
-
+            
             // Validate record fits in block
             if (offset + recordLength > blockData.size()) {
                 throw std::runtime_error("Record extends beyond block boundary");
             }
-
-            // Extract the complete record (including RDW)
-            std::vector<uint8_t> record(blockData.begin() + offset,
+            
+            // Extract just the data portion (skip RDW)
+            std::vector<uint8_t> record(blockData.begin() + offset + 4,
                                       blockData.begin() + offset + recordLength);
             records.push_back(std::move(record));
-
+            
             offset += recordLength;
         }
-
+        
         return records;
     }
-
+    
     std::vector<std::vector<uint8_t>> flush() override {
         return {}; // Variable records don't span blocks
     }
-
+    
 private:
     uint16_t m_maxRecordLength;
 };
@@ -302,52 +302,51 @@ private:
 class SpannedRecordProcessor : public RecordProcessor {
 public:
     SpannedRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
-
+    
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> completeRecords;
-
+        
         // Skip BDW
         size_t offset = 4;
-
+        
         while (offset < blockData.size()) {
             // Get SDW
             if (offset + 4 > blockData.size()) {
                 throw std::runtime_error("Incomplete SDW at end of block");
             }
-
+            
             // Extract segment length and control information from SDW
             uint16_t segmentLength = (blockData[offset] << 8) | blockData[offset + 1];
             uint8_t segmentControl = blockData[offset + 2] & 0x03;
-
+            
             if (segmentLength < 4) {
                 throw std::runtime_error("Invalid SDW length");
             }
-
+            
             // Validate segment fits in block
             if (offset + segmentLength > blockData.size()) {
                 throw std::runtime_error("Segment extends beyond block boundary");
             }
-
-            // Process segment based on control bits
+            
+            // Process segment (skipping SDW) based on control bits
             processSegment(blockData, offset + 4, segmentLength - 4, segmentControl, completeRecords);
-
+            
             offset += segmentLength;
         }
-
+        
         return completeRecords;
     }
-
+    
     std::vector<std::vector<uint8_t>> flush() override {
         std::vector<std::vector<uint8_t>> records;
-
-        // If we have a partial record and we're flushing, something went wrong
+        
         if (!m_currentRecord.empty()) {
             throw std::runtime_error("Incomplete spanned record at end of file");
         }
-
+        
         return records;
     }
-
+    
 private:
     void processSegment(const std::vector<uint8_t>& blockData, size_t offset, size_t length,
                        uint8_t segmentControl, std::vector<std::vector<uint8_t>>& completeRecords) {
@@ -357,7 +356,7 @@ private:
                     blockData.begin() + offset,
                     blockData.begin() + offset + length));
                 break;
-
+                
             case 0b01: // First segment
                 if (!m_currentRecord.empty()) {
                     throw std::runtime_error("First segment received while processing previous record");
@@ -366,7 +365,7 @@ private:
                                      blockData.begin() + offset,
                                      blockData.begin() + offset + length);
                 break;
-
+                
             case 0b10: // Last segment
                 if (m_currentRecord.empty()) {
                     throw std::runtime_error("Last segment received without first segment");
@@ -377,7 +376,7 @@ private:
                 completeRecords.push_back(std::move(m_currentRecord));
                 m_currentRecord.clear();
                 break;
-
+                
             case 0b11: // Middle segment
                 if (m_currentRecord.empty()) {
                     throw std::runtime_error("Middle segment received without first segment");
@@ -386,15 +385,13 @@ private:
                                      blockData.begin() + offset,
                                      blockData.begin() + offset + length);
                 break;
-
-            default:
-                throw std::runtime_error("Invalid segment control code");
         }
     }
-
+    
     uint16_t m_maxRecordLength;
     std::vector<uint8_t> m_currentRecord;
 };
+
 
 // Update factory to include new processors
 class RecordProcessorFactory {
@@ -430,21 +427,12 @@ protected:
 class TextRecordTransformer : public RecordTransformer {
 public:
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
-        // For variable/spanned records, skip the RDW/SDW
-        const uint8_t* dataStart = record.data();
-        size_t dataLength = record.size();
-
-        if (record.size() >= 4 && (record[2] & 0x03) != 0) {  // Has SDW/RDW
-            dataStart += 4;
-            dataLength -= 4;
-        }
-
         // Convert EBCDIC to ASCII and trim trailing spaces
-        std::string ascii = ebcdicToAsciiString(dataStart, dataLength);
+        std::string ascii = ebcdicToAsciiString(record.data(), record.size());
         while (!ascii.empty() && ascii.back() == ' ') {
             ascii.pop_back();
         }
-
+        
         // Convert to vector<uint8_t> and add newline
         std::vector<uint8_t> result(ascii.begin(), ascii.end());
         result.push_back('\n');
@@ -459,15 +447,7 @@ public:
         : m_stripDescriptors(stripDescriptors) {}
 
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
-        if (!m_stripDescriptors) {
-            return record;  // Pass through unchanged
-        }
-
-        // Strip RDW/SDW if present
-        if (record.size() >= 4 && (record[2] & 0x03) != 0) {
-            return std::vector<uint8_t>(record.begin() + 4, record.end());
-        }
-        return record;
+        return record;  // Just pass through - all descriptor handling done by processors
     }
 
 private:
@@ -557,7 +537,7 @@ private:
     uint16_t m_recordLength;
 };
 
-// Variable binary writer (adds RDW if needed)
+// Update VariableBinaryWriter to add RDWs for output if needed
 class VariableBinaryWriter : public OutputWriter {
 public:
     VariableBinaryWriter(const std::string& filename, bool addRDW = false)
@@ -570,24 +550,16 @@ public:
 
     void writeRecord(const std::vector<uint8_t>& record) override {
         if (m_addRDW) {
-            // Add RDW if record doesn't already have one
-            if (record.size() < 4 || (record[2] & 0x03) == 0) {
-                std::vector<uint8_t> withRDW(record.size() + 4);
-                // Set RDW
-                uint16_t totalLength = record.size() + 4;
-                withRDW[0] = totalLength >> 8;
-                withRDW[1] = totalLength & 0xFF;
-                withRDW[2] = 0;  // Flags
-                withRDW[3] = 0;  // Reserved
-                // Copy record data
-                std::copy(record.begin(), record.end(), withRDW.begin() + 4);
-                m_outFile.write(reinterpret_cast<const char*>(withRDW.data()), withRDW.size());
-            } else {
-                // Record already has RDW/SDW
-                m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
-            }
+            // RDW format: 2 bytes length (including RDW), 1 byte flags, 1 byte reserved
+            std::vector<uint8_t> withRDW(record.size() + 4);
+            uint16_t totalLength = record.size() + 4;
+            withRDW[0] = totalLength >> 8;
+            withRDW[1] = totalLength & 0xFF;
+            withRDW[2] = 0;  // Flags
+            withRDW[3] = 0;  // Reserved
+            std::copy(record.begin(), record.end(), withRDW.begin() + 4);
+            m_outFile.write(reinterpret_cast<const char*>(withRDW.data()), withRDW.size());
         } else {
-            // Pass through without adding RDW
             m_outFile.write(reinterpret_cast<const char*>(record.data()), record.size());
         }
     }
