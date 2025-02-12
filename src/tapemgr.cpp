@@ -208,6 +208,15 @@ void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     }
 }
 
+std::string createTapeDate(int year, int dayOfYear) {
+    char century = (year >= 2000) ? '0' : ' ';  // Assume 1900s or 2000s
+    std::ostringstream ss;
+    ss << century
+       << std::setfill('0') << std::setw(2) << (year % 100)
+       << std::setfill('0') << std::setw(3) << dayOfYear;
+    return ss.str();
+}
+
 class EbcdicUtil {
 public:
     static std::vector<uint8_t> utf8ToEbcdic(const std::vector<uint8_t>& input) {
@@ -1588,16 +1597,33 @@ bool AwsTapeDumper::validateHDR1Label(const HDR1Label& label) {
     bool isValid = true;
 
     // Validate creation date and expiration date
-    auto validateDate = [](const unsigned char* date, const char* fieldName) {
-        if (!std::all_of(date, date + 6, [](unsigned char c) { return (c >= 0xF0 && c <= 0xF9) || c == 0x40; })) {
-            std::cout << "Warning: Invalid " << fieldName << " format in HDR1 label. Expected format is CYYDDD." << std::endl;
+    auto validateTapeDate = [](const unsigned char* date, const char* fieldName) {
+        // First byte should be space or digit for century
+        if (date[0] != 0x40 && (date[0] < 0xF0 || date[0] > 0xF9)) {
+            std::cout << "Warning: Invalid century code in " << fieldName << std::endl;
             return false;
         }
+
+        // Next two bytes should be digits for year
+        if ((date[1] < 0xF0 || date[1] > 0xF9) ||
+            (date[2] < 0xF0 || date[2] > 0xF9)) {
+            std::cout << "Warning: Invalid year in " << fieldName << std::endl;
+            return false;
+        }
+
+        // Last three bytes should be digits for day
+        for (int i = 3; i < 6; i++) {
+            if (date[i] < 0xF0 || date[i] > 0xF9) {
+                std::cout << "Warning: Invalid day in " << fieldName << std::endl;
+                return false;
+            }
+        }
+
         return true;
     };
 
-    isValid &= validateDate(label.creationDate, "creation date");
-    isValid &= validateDate(label.expirationDate, "expiration date");
+    isValid &= validateTapeDate(label.creationDate, "creation date");
+    isValid &= validateTapeDate(label.expirationDate, "expiration date");
 
     // Validate dataset name
     if (!std::all_of(label.dataSetIdentifier, label.dataSetIdentifier + 17,
@@ -1814,7 +1840,6 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                 }
             }
 
-            // Validate dates if present
             auto validateDate = [&error](const json& file, const char* field) {
                 if (file.contains(field)) {
                     if (!file[field].is_string()) {
@@ -1822,9 +1847,36 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                         return false;
                     }
                     std::string date = file[field];
-                    if (date.length() != 6 || !std::all_of(date.begin(), date.end(),
-                        [](char c) { return std::isdigit(c); })) {
-                        error = std::string("Invalid ") + field + " format. Must be 6 digits (CYYDDD)";
+                    if (date.length() != 6) {
+                        error = std::string("Invalid ") + field + " length. Must be 6 digits (cyyddd)";
+                        return false;
+                    }
+
+                    // Check century code
+                    char c = date[0];
+                    if (c != ' ' && c != '0' && c != '1') {  // Most common cases
+                        if (!std::isdigit(c)) {
+                            error = std::string("Invalid century code in ") + field;
+                            return false;
+                        }
+                    }
+
+                    // Check year
+                    if (!std::isdigit(date[1]) || !std::isdigit(date[2])) {
+                        error = std::string("Invalid year in ") + field;
+                        return false;
+                    }
+
+                    // Check day of year
+                    int ddd;
+                    try {
+                        ddd = std::stoi(date.substr(3,3));
+                        if (ddd < 1 || ddd > 366) {
+                            error = std::string("Invalid day in ") + field + " (must be 001-366)";
+                            return false;
+                        }
+                    } catch (...) {
+                        error = std::string("Invalid day format in ") + field;
                         return false;
                     }
                 }
