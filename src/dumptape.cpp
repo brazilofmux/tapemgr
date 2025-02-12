@@ -12,6 +12,9 @@
 #include <string>
 #include <getopt.h>
 #include <vector>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 enum class VerbosityLevel {
     Summary,
@@ -174,6 +177,12 @@ public:
     static bool validateHDR1Label(const HDR1Label& label);
     static bool validateHDR2Label(const HDR2Label& label);
 
+    // Generates JSON configuration for all files found on tape
+    json generateConfig() const;
+
+    // Writes configuration to a file
+    void writeConfig(const std::string& filename) const;
+
 private:
     // Internal processing methods
     bool readBlock(AwsTapeBlockHeader& header, std::vector<uint8_t>& data);
@@ -182,22 +191,22 @@ private:
     void processHDR2Label(const HDR2Label& label);
     void processEOF1Label(const EOF1Label& label);
     void processEOF2Label(const EOF2Label& label);
-    
+
     // File position tracking
     bool seekToFile(const TapeFileInfo& file);
     std::streampos getCurrentPosition();
-    
+
     // Internal state
     std::string m_inputFile;
     std::ifstream m_tapeFile;
     VerbosityLevel m_verbosity;
     std::vector<TapeFileInfo> m_files;
-    
+
     // Tape state tracking
     std::string m_currentVolser;
     uint32_t m_currentBlockCount;
     bool m_inDataBlocks;
-    
+
     // Current file being processed
     TapeFileInfo m_currentFile;
 };
@@ -207,12 +216,12 @@ AwsTapeDumper::AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbos
     , m_verbosity(verbosity)
     , m_currentBlockCount(0)
     , m_inDataBlocks(false) {
-    
+
     m_tapeFile.open(inputFile, std::ios::binary);
     if (!m_tapeFile) {
         throw std::runtime_error("Error opening file: " + inputFile);
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "Processing AWSTAPE file: " << inputFile << std::endl;
     }
@@ -231,7 +240,7 @@ std::vector<TapeFileInfo> AwsTapeDumper::getFiles() {
             std::cout << "Warning: No files found. Has the tape been scanned?" << std::endl;
         }
     }
-    
+
     return m_files;
 }
 
@@ -246,9 +255,9 @@ bool AwsTapeDumper::readBlock(AwsTapeBlockHeader& header, std::vector<uint8_t>& 
         // Resize buffer and read the data
         data.resize(header.curblkl);
         m_tapeFile.read(reinterpret_cast<char*>(data.data()), header.curblkl);
-        
+
         if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Block at position: 0x" << std::hex << (m_tapeFile.tellg() - static_cast<std::streamoff>(header.curblkl)) 
+            std::cout << "Block at position: 0x" << std::hex << (m_tapeFile.tellg() - static_cast<std::streamoff>(header.curblkl))
                       << ", size: " << std::dec << header.curblkl << " bytes" << std::endl;
         }
     } else {
@@ -262,7 +271,7 @@ bool AwsTapeDumper::scanTape() {
     m_files.clear();
     m_currentBlockCount = 0;
     m_inDataBlocks = false;
-    
+
     // Seek to beginning of file
     m_tapeFile.clear();
     m_tapeFile.seekg(0);
@@ -288,9 +297,9 @@ bool AwsTapeDumper::scanTape() {
             else if (labelIdentifier == "HDR1") {
                 // Start of a new file
                 m_currentFile = TapeFileInfo();
-                m_currentFile.fileStart = m_tapeFile.tellg() - 
+                m_currentFile.fileStart = m_tapeFile.tellg() -
                     (std::streampos)(sizeof(AwsTapeBlockHeader) + header.curblkl);
-                
+
                 const HDR1Label* hdr1 = reinterpret_cast<const HDR1Label*>(buffer.data());
                 if (validateHDR1Label(*hdr1)) {
                     processHDR1Label(*hdr1);
@@ -309,9 +318,9 @@ bool AwsTapeDumper::scanTape() {
             else if (labelIdentifier == "EOF2") {
                 const EOF2Label* eof2 = reinterpret_cast<const EOF2Label*>(buffer.data());
                 processEOF2Label(*eof2);
-                
+
                 // End of the current file
-                m_currentFile.dataEnd = m_tapeFile.tellg() - 
+                m_currentFile.dataEnd = m_tapeFile.tellg() -
                     (std::streampos)(sizeof(AwsTapeBlockHeader) + header.curblkl);
                 m_files.push_back(m_currentFile);
             }
@@ -326,7 +335,7 @@ bool AwsTapeDumper::scanTape() {
             if (m_verbosity >= VerbosityLevel::Detailed) {
                 std::cout << "TAPE MARK" << std::endl;
             }
-            
+
             if (prevFlags == header.flags1) {
                 // Two consecutive tape marks indicate end of tape
                 if (m_verbosity >= VerbosityLevel::Detailed) {
@@ -334,7 +343,7 @@ bool AwsTapeDumper::scanTape() {
                 }
                 break;
             }
-            
+
             // Single tape mark might indicate start of data blocks
             if (!m_inDataBlocks) {
                 m_currentFile.dataStart = m_tapeFile.tellg();
@@ -483,14 +492,63 @@ bool AwsTapeDumper::validateHDR2Label(const HDR2Label& label) {
     return isValid;
 }
 
+json AwsTapeDumper::generateConfig() const {
+    json config;
+
+    // Add volume-level information
+    config["volume_serial"] = m_currentVolser;
+    config["owner_code"] = "TAPEOWNR";  // We could extract this from VOL1 if needed
+
+    // Add files array
+    json files = json::array();
+    for (const auto& file : m_files) {
+        json fileObj;
+        fileObj["dataset_name"] = file.datasetName;
+        fileObj["local_file"] = "";  // Empty by default, to be filled in by user
+
+        // Construct full record format (e.g., FB, VB)
+        std::string recfm(1, file.recordFormat);
+        if (file.blockAttribute == 'B') {
+            recfm += "B";
+        } else if (file.blockAttribute == 'S') {
+            recfm += "S";
+        } else if (file.blockAttribute == 'R') {
+            recfm += "BS";  // R means both blocked and spanned
+        }
+        fileObj["record_format"] = recfm;
+
+        fileObj["record_length"] = file.recordLength;
+        fileObj["block_size"] = file.blockSize;
+        fileObj["block_count"] = file.blockCount;
+        fileObj["binary"] = false;  // Default to false, user can modify
+
+        files.push_back(fileObj);
+    }
+    config["files"] = files;
+
+    return config;
+}
+
+void AwsTapeDumper::writeConfig(const std::string& filename) const {
+    json config = generateConfig();
+
+    std::ofstream out(filename);
+    if (!out) {
+        throw std::runtime_error("Unable to open output file: " + filename);
+    }
+
+    // Write with pretty printing (4 spaces indent)
+    out << config.dump(4) << std::endl;
+}
+
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
     m_currentVolser = ebcdicToAsciiString(label.volumeSerial, 6);
-    
+
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "VOL1 Label found" << std::endl;
         std::cout << "  Volume Serial: " << m_currentVolser << std::endl;
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Owner Code: " << ebcdicToAsciiString(label.ownerCode, 10) << std::endl;
     }
@@ -499,12 +557,12 @@ void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
 void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
     m_currentFile.datasetName = ebcdicToAsciiString(label.dataSetIdentifier, 17);
     m_currentFile.volumeSerial = ebcdicToAsciiString(label.dataSetSerialNumber, 6);
-    
+
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "HDR1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << m_currentFile.datasetName << std::endl;
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Dataset Serial Number: " << m_currentFile.volumeSerial << std::endl;
         std::cout << "  Volume Sequence Number: " << ebcdicToAsciiString(label.volumeSequenceNumber, 4) << std::endl;
@@ -518,19 +576,19 @@ void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
 void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
     m_currentFile.recordFormat = ebcdicToAsciiTable[label.recordFormat];
     m_currentFile.blockAttribute = ebcdicToAsciiTable[label.blockAttribute];
-    
+
     // Convert EBCDIC numeric strings to integers
     std::string blksize = ebcdicToAsciiString(label.blockLength, 5);
     std::string lrecl = ebcdicToAsciiString(label.recordLength, 5);
     m_currentFile.blockSize = std::stoi(blksize);
     m_currentFile.recordLength = std::stoi(lrecl);
-    
+
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "HDR2 Label found" << std::endl;
         std::cout << "  Record Format: " << m_currentFile.recordFormat << std::endl;
         std::cout << "  Block Attribute: " << m_currentFile.blockAttribute << std::endl;
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Block Length: " << m_currentFile.blockSize << std::endl;
         std::cout << "  Record Length: " << m_currentFile.recordLength << std::endl;
@@ -547,7 +605,7 @@ void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
         std::cout << "EOF1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << ebcdicToAsciiString(label.dataSetIdentifier, 17) << std::endl;
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::string blockCount = ebcdicToAsciiString(label.blockCount, 6);
         m_currentFile.blockCount = std::stoi(blockCount);
@@ -561,7 +619,7 @@ void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
         std::cout << "  Record Format: " << ebcdicToAsciiTable[label.recordFormat] << std::endl;
         std::cout << "  Block Attribute: " << ebcdicToAsciiTable[label.blockAttribute] << std::endl;
     }
-    
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "  Block Length: " << ebcdicToAsciiString(label.blockLength, 5) << std::endl;
         std::cout << "  Record Length: " << ebcdicToAsciiString(label.recordLength, 5) << std::endl;
@@ -620,23 +678,30 @@ int main(int argc, char* argv[]) {
         for (const auto& inputFile : options.inputFiles) {
             // Create our tape dumper
             AwsTapeDumper tapeDumper(inputFile, options.verbosity);
-            
+
             // Scan the tape to build table of contents
             if (!tapeDumper.scanTape()) {
                 std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
                 continue;
             }
 
-            // Get the files found on the tape
-            auto files = tapeDumper.getFiles();
-            
+            // Generate config filename from input filename
+            std::string configFile = inputFile + ".json";
+            tapeDumper.writeConfig(configFile);
+
             if (options.verbosity >= VerbosityLevel::Normal) {
+                std::cout << "Configuration written to: " << configFile << std::endl;
+            }
+
+            // Only show detailed file information at higher verbosity levels
+            if (options.verbosity >= VerbosityLevel::Detailed) {
+                auto files = tapeDumper.getFiles();
                 std::cout << "\nFiles found on tape " << inputFile << ":" << std::endl;
                 for (const auto& file : files) {
                     std::cout << "  Dataset: " << file.datasetName << std::endl;
-                    std::cout << "    Record Format: " << file.recordFormat 
+                    std::cout << "    Record Format: " << file.recordFormat
                              << " Block Attribute: " << file.blockAttribute << std::endl;
-                    std::cout << "    Block Size: " << file.blockSize 
+                    std::cout << "    Block Size: " << file.blockSize
                              << " Record Length: " << file.recordLength << std::endl;
                     std::cout << "    Block Count: " << file.blockCount << std::endl;
                 }
