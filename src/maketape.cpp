@@ -158,300 +158,263 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
     return jcl.str();
 }
 
-class RecordBlockBuilder {
+// Record processing abstractions
+class RecordProcessor {
 public:
-    RecordBlockBuilder(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : m_config(config), m_verbosity(verbosity) {
-        initializeNewBlock();
-        if (m_verbosity >= VerbosityLevel::Detailed) {
-            std::cout << "Initializing RecordBlockBuilder with:"
-                      << "\n  Record Format: " << m_config.recordFormat
-                      << "\n  Block Size: " << m_config.blksize
-                      << "\n  Record Length: " << m_config.lrecl
-                      << std::endl;
-        }
-    }
+    virtual ~RecordProcessor() = default;
 
+    // Main entry point for processing a record
+    virtual std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) = 0;
+
+    // Final cleanup/flush
+    virtual std::vector<uint8_t> flush() = 0;
+
+    // Record counting
     size_t getRecordCount() const { return m_recordCount; }
 
-    std::vector<std::vector<uint8_t>> addRecord(const std::vector<uint8_t>& record) {
-        std::vector<std::vector<uint8_t>> completeBlocks;
+protected:
+    size_t m_recordCount = 0;
+    VerbosityLevel m_verbosity;
+};
 
-        // First determine if this is a spanned format
-        bool isSpanned = m_config.recfm.find('S') != std::string::npos;
-        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
-
-        if (m_config.recordFormat == 'V') {
-            if (isSpanned) {
-                if (isBlocked) {
-                    return addVBSRecord(record);
-                } else {
-                    return addVSRecord(record);
-                }
-            } else if (isBlocked) {
-                return addVariableRecord(record, true);
-            } else {
-                return addVariableRecord(record, false);
-            }
-        } else if (m_config.recordFormat == 'F') {
-            return addFixedRecord(record);
-        }
-
-        throw std::runtime_error("Unsupported record format: " + m_config.recfm);
+class BlockBuilder {
+public:
+    BlockBuilder(uint16_t blockSize, bool usesBDW, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_blockSize(blockSize), m_usesBDW(usesBDW), m_verbosity(verbosity) {
+        initializeNewBlock();
     }
 
-    std::vector<uint8_t> flush() {
-        if (m_currentBlockOffset > 4) {
-            if (m_verbosity >= VerbosityLevel::Debug) {
-                std::cout << "Flushing final block of size: " << m_currentBlockOffset << std::endl;
-            }
-            finishCurrentBlock();
-            std::vector<uint8_t> finalBlock = m_currentBlock;
-            initializeNewBlock();
-            return finalBlock;
+    bool addData(const std::vector<uint8_t>& data) {
+        if (!hasRoom(data.size())) {
+            return false;
         }
-        return std::vector<uint8_t>();
+
+        std::copy(data.begin(), data.end(),
+                 m_currentBlock.begin() + m_currentOffset);
+        m_currentOffset += data.size();
+        return true;
+    }
+
+    std::vector<uint8_t> finish() {
+        if (m_currentOffset <= (m_usesBDW ? 4 : 0)) {
+            return std::vector<uint8_t>();
+        }
+
+        if (m_usesBDW) {
+            // Write BDW
+            m_currentBlock[0] = m_currentOffset >> 8;    // Length high byte
+            m_currentBlock[1] = m_currentOffset;         // Length low byte
+            m_currentBlock[2] = 0;                       // Flags
+            m_currentBlock[3] = 0;                       // Reserved
+        }
+
+        std::vector<uint8_t> block(m_currentBlock.begin(),
+                                  m_currentBlock.begin() + m_currentOffset);
+        initializeNewBlock();
+        return block;
+    }
+
+    bool hasRoom(size_t size) const {
+        return (m_currentOffset + size) <= m_blockSize;
+    }
+
+private:
+    void initializeNewBlock() {
+        m_currentBlock.clear();
+        m_currentBlock.resize(m_blockSize, 0x40);  // Initialize with EBCDIC space
+        m_currentOffset = m_usesBDW ? 4 : 0;       // Start after BDW if used
+    }
+
+    std::vector<uint8_t> m_currentBlock;
+    size_t m_currentOffset;
+    uint16_t m_blockSize;
+    bool m_usesBDW;
+    VerbosityLevel m_verbosity;
+};
+
+class FixedRecordProcessor : public RecordProcessor {
+public:
+    FixedRecordProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_blockBuilder(config.blksize, false, verbosity) {
+        m_verbosity = verbosity;
+    }
+
+    std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) override {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
+
+        // For unblocked F, each record gets its own block
+        if (!isBlocked && m_blockBuilder.hasRoom(data.size())) {
+            std::vector<uint8_t> block = m_blockBuilder.finish();
+            if (!block.empty()) {
+                completeBlocks.push_back(block);
+            }
+        }
+
+        if (!m_blockBuilder.hasRoom(data.size())) {
+            std::vector<uint8_t> block = m_blockBuilder.finish();
+            if (!block.empty()) {
+                completeBlocks.push_back(block);
+            }
+        }
+
+        m_blockBuilder.addData(data);
+        m_recordCount++;
+
+        // For unblocked F, finish the block immediately
+        if (!isBlocked) {
+            std::vector<uint8_t> block = m_blockBuilder.finish();
+            completeBlocks.push_back(block);
+        }
+
+        return completeBlocks;
+    }
+
+    std::vector<uint8_t> flush() override {
+        return m_blockBuilder.finish();
     }
 
 private:
     const FileConfig& m_config;
-    VerbosityLevel m_verbosity;
-    std::vector<uint8_t> m_currentBlock;
-    size_t m_currentBlockOffset;
-    size_t m_recordCount = 0;
+    BlockBuilder m_blockBuilder;
+};
 
-    void initializeNewBlock() {
-        m_currentBlock.clear();
-        m_currentBlock.resize(m_config.blksize, 0x40);
-        // Only start after BDW for variable formats
-        m_currentBlockOffset = (m_config.recordFormat == 'V') ? 4 : 0;
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Initialized new block:"
-                      << "\n  Size: " << m_config.blksize
-                      << "\n  Starting offset: " << m_currentBlockOffset
-                      << std::endl;
-        }
+class VariableRecordProcessor : public RecordProcessor {
+public:
+    VariableRecordProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_blockBuilder(config.blksize, true, verbosity) {
+        m_verbosity = verbosity;
     }
 
-    // Helper function to add SDW to block
-    void addSDW(uint16_t length, uint8_t segmentControl) {
-        m_currentBlock[m_currentBlockOffset] = length >> 8;       // Length high byte
-        m_currentBlock[m_currentBlockOffset + 1] = length;        // Length low byte
-        m_currentBlock[m_currentBlockOffset + 2] = segmentControl;// Segment control
-        m_currentBlock[m_currentBlockOffset + 3] = 0;            // Reserved
-    }
-
-    std::vector<std::vector<uint8_t>> addVSRecord(const std::vector<uint8_t>& record) {
+    std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) override {
         std::vector<std::vector<uint8_t>> completeBlocks;
+        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
+
+        if (m_config.binary) {
+            // For binary VB, data already includes RDW
+            // Just need to handle blocking
+            if (!isBlocked || !m_blockBuilder.hasRoom(data.size())) {
+                std::vector<uint8_t> block = m_blockBuilder.finish();
+                if (!block.empty()) {
+                    completeBlocks.push_back(block);
+                }
+            }
+            m_blockBuilder.addData(data);
+        } else {
+            // For text VB, need to add RDW
+            uint16_t recordLength = data.size() + 4;  // Include RDW size
+            std::vector<uint8_t> record(recordLength);
+
+            // Create RDW
+            record[0] = recordLength >> 8;     // Length high byte
+            record[1] = recordLength;          // Length low byte
+            record[2] = 0;                     // Flags
+            record[3] = 0;                     // Reserved
+
+            // Add the actual data
+            std::copy(data.begin(), data.end(), record.begin() + 4);
+
+            if (!isBlocked || !m_blockBuilder.hasRoom(recordLength)) {
+                std::vector<uint8_t> block = m_blockBuilder.finish();
+                if (!block.empty()) {
+                    completeBlocks.push_back(block);
+                }
+            }
+            m_blockBuilder.addData(record);
+        }
 
         m_recordCount++;
+        return completeBlocks;
+    }
 
-        size_t remainingData = record.size();
+    std::vector<uint8_t> flush() override {
+        return m_blockBuilder.finish();
+    }
+
+private:
+    const FileConfig& m_config;
+    BlockBuilder m_blockBuilder;
+};
+
+class SpannedRecordProcessor : public RecordProcessor {
+public:
+    SpannedRecordProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_blockBuilder(config.blksize, true, verbosity) {
+        m_verbosity = verbosity;
+    }
+
+    std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) override {
+        std::vector<std::vector<uint8_t>> completeBlocks;
+        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
+
+        // Calculate maximum data per segment (block size minus BDW and SDW)
+        size_t maxDataPerSegment = m_config.blksize - 8;  // 4 for BDW, 4 for SDW
+        size_t remainingData = data.size();
         size_t dataOffset = 0;
         bool isFirstSegment = true;
 
         while (remainingData > 0) {
-            // Calculate maximum data that can fit in this block
-            size_t maxDataInBlock = m_config.blksize - m_currentBlockOffset - 4; // Account for SDW
-            size_t dataInThisSegment = std::min(remainingData, maxDataInBlock);
-            bool isLastSegment = (dataInThisSegment == remainingData);
-
-            // If current block doesn't have enough space, finish it and start new one
-            if (m_currentBlockOffset + dataInThisSegment + 4 > m_config.blksize) {
-                finishCurrentBlock();
-                completeBlocks.push_back(m_currentBlock);
-                initializeNewBlock();
-            }
+            // Calculate this segment's size
+            size_t dataInSegment = std::min(remainingData, maxDataPerSegment);
+            bool isLastSegment = (dataInSegment == remainingData);
 
             // Set segment control code
             uint8_t segmentControl = 0;
-            if (isFirstSegment && isLastSegment) segmentControl = 0b00;      // Complete logical record
+            if (isFirstSegment && isLastSegment) segmentControl = 0b00;      // Complete record
             else if (isFirstSegment) segmentControl = 0b01;                  // First segment
             else if (isLastSegment) segmentControl = 0b10;                   // Last segment
             else segmentControl = 0b11;                                      // Middle segment
 
+            // Create segment with SDW
+            std::vector<uint8_t> segment(dataInSegment + 4);  // Data plus SDW
             // Add SDW
-            uint16_t segmentLength = dataInThisSegment + 4;  // Include SDW size
-            addSDW(segmentLength, segmentControl);
+            segment[0] = ((dataInSegment + 4) >> 8) & 0xFF;  // Length including SDW
+            segment[1] = (dataInSegment + 4) & 0xFF;
+            segment[2] = segmentControl;
+            segment[3] = 0;  // Reserved
 
             // Copy data
-            std::copy(record.begin() + dataOffset,
-                     record.begin() + dataOffset + dataInThisSegment,
-                     m_currentBlock.begin() + m_currentBlockOffset + 4);
+            std::copy(data.begin() + dataOffset,
+                     data.begin() + dataOffset + dataInSegment,
+                     segment.begin() + 4);
 
-            m_currentBlockOffset += segmentLength;
-            dataOffset += dataInThisSegment;
-            remainingData -= dataInThisSegment;
-            isFirstSegment = false;
-
-            if (m_verbosity >= VerbosityLevel::Debug) {
-                std::cout << "Added VS segment:"
-                          << "\n  Length: " << segmentLength
-                          << "\n  Control: 0x" << std::hex << (int)segmentControl << std::dec
-                          << "\n  Remaining data: " << remainingData
-                          << std::endl;
-            }
-        }
-
-        return completeBlocks;
-    }
-
-    std::vector<std::vector<uint8_t>> addVBSRecord(const std::vector<uint8_t>& record) {
-        // For VBS, we'll use the same logic as VS but we'll try to pack multiple
-        // segments into blocks when possible
-        return addVSRecord(record);
-    }
-
-    std::vector<std::vector<uint8_t>> addVariableRecord(const std::vector<uint8_t>& record, bool blocked) {
-        std::vector<std::vector<uint8_t>> completeBlocks;
-
-        // Calculate record length including RDW
-        uint16_t recordLength = record.size() + 4;
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Processing " << (blocked ? "VB" : "V") << " record:"
-                      << "\n  Record length (with RDW): " << recordLength
-                      << "\n  Current block offset: " << m_currentBlockOffset
-                      << "\n  Space remaining: " << (m_config.blksize - m_currentBlockOffset)
-                      << std::endl;
-        }
-
-        // For non-blocked format or if record won't fit in current block
-        if (!blocked || (m_currentBlockOffset + recordLength > m_config.blksize)) {
-            if (m_currentBlockOffset > 4) {  // If we have data in the current block
-                finishCurrentBlock();
-                completeBlocks.push_back(m_currentBlock);
-                initializeNewBlock();
-            }
-        }
-
-        // Safety check
-        if (m_currentBlockOffset + recordLength > m_config.blksize) {
-            throw std::runtime_error("Record too large for block size");
-        }
-
-        // Add RDW
-        m_currentBlock[m_currentBlockOffset] = recordLength >> 8;     // Length high byte
-        m_currentBlock[m_currentBlockOffset + 1] = recordLength;      // Length low byte
-        m_currentBlock[m_currentBlockOffset + 2] = 0;                 // Flags
-        m_currentBlock[m_currentBlockOffset + 3] = 0;                 // Reserved
-
-        // Add record data
-        if (record.size() > 0) {
-            std::copy(record.begin(), record.end(),
-                     m_currentBlock.begin() + m_currentBlockOffset + 4);
-        }
-
-        m_currentBlockOffset += recordLength;
-        m_recordCount++;
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Added record #" << m_recordCount << " to block"
-                      << "\n  New block offset: " << m_currentBlockOffset
-                      << std::endl;
-        }
-
-        return completeBlocks;
-    }
-
-    std::vector<std::vector<uint8_t>> addFixedRecord(const std::vector<uint8_t>& record) {
-        std::vector<std::vector<uint8_t>> completeBlocks;
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Processing fixed record:"
-                      << "\n  Record length: " << record.size()
-                      << "\n  Current block offset: " << m_currentBlockOffset
-                      << std::endl;
-        }
-
-        bool isBlocked = m_config.recfm.find('B') != std::string::npos;
-
-        if (m_config.binary) {
-            // Start new block if needed
-            if (!isBlocked || m_currentBlockOffset + record.size() > m_config.blksize) {
-                if (m_currentBlockOffset > 0) {
-                    finishCurrentBlock();
-                    completeBlocks.push_back(m_currentBlock);
-                    initializeNewBlock();
+            // Add to block
+            if (!m_blockBuilder.hasRoom(segment.size())) {
+                std::vector<uint8_t> block = m_blockBuilder.finish();
+                if (!block.empty()) {
+                    completeBlocks.push_back(block);
                 }
             }
+            m_blockBuilder.addData(segment);
 
-            // Copy raw data
-            std::copy(record.begin(), record.end(),
-                     m_currentBlock.begin() + m_currentBlockOffset);
-            m_currentBlockOffset += record.size();
-            m_recordCount++;
-
-            // Finish block if unblocked or full
-            if (!isBlocked || m_currentBlockOffset == m_config.blksize) {
-                finishCurrentBlock();
-                completeBlocks.push_back(m_currentBlock);
-                initializeNewBlock();
-            }
-
-            return completeBlocks;
+            dataOffset += dataInSegment;
+            remainingData -= dataInSegment;
+            isFirstSegment = false;
         }
 
-        // For unblocked (F), finish any existing block before starting new record
-        if (!isBlocked && m_currentBlockOffset > 0) {
-            finishCurrentBlock();
-            completeBlocks.push_back(m_currentBlock);
-            initializeNewBlock();
-        }
-
-        // For blocked (FB), only start new block if record won't fit
-        if (isBlocked && m_currentBlockOffset + record.size() > m_config.blksize) {
-            finishCurrentBlock();
-            completeBlocks.push_back(m_currentBlock);
-            initializeNewBlock();
-        }
-
-        // Copy the data
-        if (record.size() > 0) {
-            std::copy(record.begin(), record.end(),
-                     m_currentBlock.begin() + m_currentBlockOffset);
-        }
-
-        m_currentBlockOffset += record.size();
         m_recordCount++;
-
-        if (!isBlocked || m_currentBlockOffset == m_config.blksize) {
-            finishCurrentBlock();
-            completeBlocks.push_back(m_currentBlock);
-            initializeNewBlock();
-        }
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Added fixed record #" << m_recordCount << " to block"
-                      << "\n  New block offset: " << m_currentBlockOffset
-                      << std::endl;
-        }
-
         return completeBlocks;
     }
 
-    void finishCurrentBlock() {
-        if (m_config.recordFormat == 'V') {
-            // Only write BDW for variable formats
-            uint16_t blockLength = m_currentBlockOffset;
-            m_currentBlock[0] = blockLength >> 8;    // Length high byte
-            m_currentBlock[1] = blockLength;         // Length low byte
-            m_currentBlock[2] = 0;                   // Flags
-            m_currentBlock[3] = 0;                   // Reserved
-        }
-
-        // For fixed formats, we've already written the exact block size worth of data
-        m_currentBlock.resize(m_currentBlockOffset);
-
-        if (m_verbosity >= VerbosityLevel::Debug) {
-            std::cout << "Finishing block:"
-                      << "\n  Final length: " << m_currentBlockOffset
-                      << "\n  Records in block: " << m_recordCount
-                      << std::endl;
-        }
+    std::vector<uint8_t> flush() override {
+        return m_blockBuilder.finish();
     }
+
+private:
+    const FileConfig& m_config;
+    BlockBuilder m_blockBuilder;
 };
+
+static std::unique_ptr<RecordProcessor> createRecordProcessor(const FileConfig& config, VerbosityLevel verbosity) {
+    if (config.recfm.find('S') != std::string::npos) {
+        return std::make_unique<SpannedRecordProcessor>(config, verbosity);
+    } else if (config.recordFormat == 'V') {
+        return std::make_unique<VariableRecordProcessor>(config, verbosity);
+    } else if (config.recordFormat == 'F') {
+        return std::make_unique<FixedRecordProcessor>(config, verbosity);
+    }
+    throw std::runtime_error("Unsupported record format: " + config.recfm);
+}
 
 bool validateFixedBinaryFile(const std::string& filename, uint16_t lrecl) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -722,95 +685,68 @@ private:
         if (m_verbosity >= VerbosityLevel::Normal) {
             std::cout << "  Writing data blocks" << std::endl;
         }
-        std::ifstream inFile(config.inputFile, std::ios::binary);
-        RecordBlockBuilder blockBuilder(config, m_verbosity);
 
-        size_t recordCount = 0;
+        std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
+        auto processor = createRecordProcessor(config, m_verbosity);
+
         if (config.binary) {
             if (config.recordFormat == 'V') {
+                // Handle binary VB format (reading existing RDWs)
                 while (inFile) {
-                    // Read RDW
                     uint8_t rdw[4];
                     if (!inFile.read(reinterpret_cast<char*>(rdw), 4)) {
-                        break;  // End of file
+                        break;
                     }
-
-                    // Get record length from RDW (includes RDW size)
                     uint16_t recordLength = (rdw[0] << 8) | rdw[1];
                     if (recordLength < 4) {
                         throw std::runtime_error("Invalid RDW length in binary VB file");
                     }
-
-                    // Read record data
                     std::vector<uint8_t> record(recordLength);
                     std::copy(rdw, rdw + 4, record.begin());
                     if (!inFile.read(reinterpret_cast<char*>(record.data() + 4), recordLength - 4)) {
                         throw std::runtime_error("Unexpected end of file while reading VB record");
                     }
-
-                    auto completeBlocks = blockBuilder.addRecord(record);
-                    for (const auto& block : completeBlocks) {
+                    auto blocks = processor->processRecord(record);
+                    for (const auto& block : blocks) {
                         writeBlock(block, 0xA0);
                         m_blockCount++;
                     }
-                    recordCount++;
                 }
             } else {
+                // Handle binary F/FB format
                 std::vector<uint8_t> record(config.lrecl);
                 while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
-                    auto completeBlocks = blockBuilder.addRecord(record);
-                    for (const auto& block : completeBlocks) {
+                    auto blocks = processor->processRecord(record);
+                    for (const auto& block : blocks) {
                         writeBlock(block, 0xA0);
                         m_blockCount++;
                     }
                 }
             }
         } else {
-            // Handle text format - existing code
+            // Handle text format
             std::string line;
             while (std::getline(inFile, line)) {
-                // Remove Windows-style line ending if present
                 if (!line.empty() && line.back() == '\r') {
                     line.pop_back();
                 }
-
-                // Trim trailing spaces for variable records
-                if (config.recordFormat == 'V') {
-                    while (!line.empty() && std::isspace(line.back())) {
-                        line.pop_back();
-                    }
-                }
-
                 auto ebcdicData = utf8ToEbcdic(line);
-
-                // For variable records, use actual length
-                // For fixed records, pad to LRECL
-                std::vector<uint8_t> record;
-                if (config.recordFormat == 'V') {
-                    record = ebcdicData;  // Use exact length
-                } else {
-                    record.assign(config.lrecl, 0x40);  // Pad fixed records
-                    std::copy(ebcdicData.begin(),
-                             ebcdicData.begin() + std::min(ebcdicData.size(), (size_t)config.lrecl),
-                             record.begin());
-                }
-
-                auto completeBlocks = blockBuilder.addRecord(record);
-                for (const auto& block : completeBlocks) {
+                auto blocks = processor->processRecord(ebcdicData);
+                for (const auto& block : blocks) {
                     writeBlock(block, 0xA0);
                     m_blockCount++;
                 }
-                recordCount++;
             }
         }
-        config.recordCount = recordCount;
 
         // Handle any remaining partial block
-        auto finalBlock = blockBuilder.flush();
+        auto finalBlock = processor->flush();
         if (!finalBlock.empty()) {
             writeBlock(finalBlock, 0xA0);
             m_blockCount++;
         }
+
+        config.recordCount = processor->getRecordCount();
     }
 
     void writeEOFLabels(const FileConfig& config, int fileNumber) {
