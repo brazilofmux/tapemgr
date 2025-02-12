@@ -11,8 +11,6 @@
 #include <string>
 #include <vector>
 
-#include "utf8tables.h"
-
 enum class VerbosityLevel {
     Summary,
     Normal,
@@ -46,50 +44,6 @@ struct AwsTapeBlockHeader {
     uint8_t flags2;
 };
 
-// This will help decode UTF-8 sequences.
-//
-// 0xxxxxxx ==> 00000000-01111111 ==> 00-7F 1 byte sequence.
-// 10xxxxxx ==> 10000000-10111111 ==> 80-BF continue
-// 110xxxxx ==> 11000000-11011111 ==> C0-DF 2 byte sequence.
-// 1110xxxx ==> 11100000-11101111 ==> E0-EF 3 byte sequence.
-// 11110xxx ==> 11110000-11110111 ==> F0-F7 4 byte sequence.
-//              11111000-11111111 illegal
-//
-// Also, RFC 3629 specifies that 0xC0, 0xC1, and 0xF5-0xFF never
-// appear in a valid sequence.
-//
-// The first byte gives the length of a sequence (UTF8_SIZE1 - UTF8_SIZE4).
-// Bytes in the middle of a sequence map to UTF8_CONTINUE.  Bytes which should
-// not appear map to UTF8_ILLEGAL.
-//
-const unsigned char utf8_FirstByte[256] =
-{
-//  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-//
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 0
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 1
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 2
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 3
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 4
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 5
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 6
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 7
-
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 8
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 9
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // A
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // B
-    6,  6,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // C
-    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // D
-    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
-    4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
-};
-#define UTF8_SIZE1     1
-#define UTF8_SIZE2     2
-#define UTF8_SIZE3     3
-#define UTF8_SIZE4     4
-#define UTF8_CONTINUE  5
-#define UTF8_ILLEGAL   6
 
 #define EBCDIC_SUB (63)
 
@@ -157,6 +111,417 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
     }
 
     return jcl.str();
+}
+
+#define UTF8_SIZE1     1
+#define UTF8_SIZE2     2
+#define UTF8_SIZE3     3
+#define UTF8_SIZE4     4
+#define UTF8_CONTINUE  5
+#define UTF8_ILLEGAL   6
+
+#define TR_CP031_START_STATE (0)
+#define TR_CP031_ACCEPTING_STATES_START (3)
+
+class EbcdicUtil {
+public:
+    static std::vector<uint8_t> utf8ToEbcdic(const std::vector<uint8_t>& input) {
+        std::vector<uint8_t> ebcdic;
+        ebcdic.reserve(input.size());
+
+        const uint8_t* pString = input.data();
+        const uint8_t* pEnd = pString + input.size();
+
+        while (pString < pEnd) {
+            const uint8_t* p = pString;
+            uint8_t t = utf8_FirstByte[*p];
+            if (UTF8_CONTINUE <= t) {
+                ebcdic.push_back(static_cast<uint8_t>(EBCDIC_SUB));
+                ++pString;
+                continue;
+            }
+
+            int iState = TR_CP031_START_STATE;
+
+            do {
+                unsigned char ch = *p++;
+                unsigned char iColumn = tr_cp031_itt[ch];
+                unsigned short iOffset = tr_cp031_sot[iState];
+
+                for (;;) {
+                    int y = tr_cp031_sbt[iOffset];
+                    if (y < 128) {
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset += 2;
+                        }
+                    } else {
+                        y = 256-y;
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+iColumn+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset = static_cast<unsigned short>(iOffset + y + 1);
+                        }
+                    }
+                }
+            } while (iState < TR_CP031_ACCEPTING_STATES_START);
+
+            ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
+            pString = pString + t;
+        }
+
+        return ebcdic;
+    }
+
+    static std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
+        return utf8ToEbcdic(std::vector<uint8_t>(input.begin(), input.end()));
+    }
+
+private:
+    static const unsigned char utf8_FirstByte[256];
+    static const unsigned char tr_cp031_itt[256];
+    static const unsigned short tr_cp031_sot[3];
+    static const unsigned short tr_cp031_sbt[271];
+};
+
+// This will help decode UTF-8 sequences.
+//
+// 0xxxxxxx ==> 00000000-01111111 ==> 00-7F 1 byte sequence.
+// 10xxxxxx ==> 10000000-10111111 ==> 80-BF continue
+// 110xxxxx ==> 11000000-11011111 ==> C0-DF 2 byte sequence.
+// 1110xxxx ==> 11100000-11101111 ==> E0-EF 3 byte sequence.
+// 11110xxx ==> 11110000-11110111 ==> F0-F7 4 byte sequence.
+//              11111000-11111111 illegal
+//
+// Also, RFC 3629 specifies that 0xC0, 0xC1, and 0xF5-0xFF never
+// appear in a valid sequence.
+//
+// The first byte gives the length of a sequence (UTF8_SIZE1 - UTF8_SIZE4).
+// Bytes in the middle of a sequence map to UTF8_CONTINUE.  Bytes which should
+// not appear map to UTF8_ILLEGAL.
+//
+const unsigned char EbcdicUtil::utf8_FirstByte[256] = {
+//  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+//
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 0
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 1
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 2
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 3
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 4
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 5
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 6
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 7
+
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 8
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 9
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // A
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // B
+    6,  6,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // C
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // D
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
+    4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
+};
+
+// utf/tr_utf8_cp037.txt
+//
+// 255 code points.
+// 3 states, 193 columns, 804 bytes
+//
+const unsigned char EbcdicUtil::tr_cp031_itt[256] =
+{
+       0,   1,   2,   3,   4,   5,   6,   7,    8,   9,  10,  11,  12,  13,  14,  15,
+      16,  17,  18,  19,  20,  21,  22,  23,   24,  25,  13,  26,  27,  28,  29,  30,
+      31,  32,  33,  34,  35,  36,  37,  38,   39,  40,  41,  42,  43,  44,  45,  46,
+      47,  48,  49,  50,  51,  52,  53,  54,   55,  56,  57,  58,  59,  60,  61,  62,
+      63,  64,  65,  66,  67,  68,  69,  70,   71,  72,  73,  74,  75,  76,  77,  78,
+      79,  80,  81,  82,  83,  84,  85,  86,   87,  88,  89,  90,  91,  92,  93,  94,
+      95,  96,  97,  98,  99, 100, 101, 102,  103, 104, 105, 106, 107, 108, 109, 110,
+     111, 112, 113, 114, 115, 116, 117, 118,  119, 120, 121, 122, 123, 124, 125, 126,
+
+     127, 128, 129, 130, 131, 132, 133, 134,  135, 136, 137, 138, 139, 140, 141, 142,
+     143, 144, 145, 146, 147, 148, 149, 150,  151, 152, 153, 154, 155, 156, 157, 158,
+     159, 160, 161, 162, 163, 164, 165, 166,  167, 168, 169, 170, 171, 172, 173, 174,
+     175, 176, 177, 178, 179, 180, 181, 182,  183, 184, 185, 186, 187, 188, 189, 190,
+      13,  13, 191, 192,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13
+
+};
+
+const unsigned short EbcdicUtil::tr_cp031_sot[3] =
+{
+        0,  133,  202
+};
+
+const unsigned short EbcdicUtil::tr_cp031_sbt[271] =
+{
+     129,   3,   4,   5,   6,  58,  48,  49,   50,  25,   8,  16,  14,  15,  66,  17,
+      18,  19,  20,  21,  22,  63,  64,  53,   41,  27,  28,  42,  31,  32,  33,  34,
+      67,  93, 130, 126,  94, 111,  83, 128,   80,  96,  95,  81, 110,  99,  78, 100,
+     243, 244, 245, 246, 247, 248, 249, 250,  251, 252, 125,  97,  79, 129, 113, 114,
+     127, 196, 197, 198, 199, 200, 201, 202,  203, 204, 212, 213, 214, 215, 216, 217,
+     218, 219, 220, 229, 230, 231, 232, 233,  234, 235, 236, 189, 227, 190, 179, 112,
+     124, 132, 133, 134, 135, 136, 137, 138,  139, 140, 148, 149, 150, 151, 152, 153,
+     154, 155, 156, 165, 166, 167, 168, 169,  170, 171, 172, 195,  82, 211, 164,  10,
+      64,  66, 254,   1,   2, 127,  66, 192,   35,  36,  37,  38,  39,  24,   9,  26,
+      43,  44,  45,  46,  47,  12,  13,  30,   51,  52,  29,  54,  55,  56,  57,  11,
+      59,  60,  61,  62,   7,  23,  65, 258,   68, 173,  77, 180, 162, 181, 109, 184,
+     192, 183, 157, 141,  98, 205, 178, 191,  147, 146, 237, 253, 193, 163, 185, 182,
+     160, 221, 158, 142, 186, 187, 188, 174,    2,  66, 127,  66, 192, 103, 104, 101,
+     105, 102, 106, 161, 107, 119, 116, 117,  118, 123, 120, 121, 122, 175, 108, 240,
+     241, 238, 242, 239, 194, 131, 256, 257,  254, 255, 176, 177,  92,  71,  72,  69,
+      73,  70,  74, 159,  75,  87,  84,  85,   86,  91,  88,  89,  90, 143,  76, 208,
+     209, 206, 210, 207, 228, 115, 224, 225,  222, 223, 144, 145, 226,   2,  66
+};
+
+class RecordReader {
+public:
+    virtual ~RecordReader() = default;
+    virtual bool getNextRecord(std::vector<uint8_t>& record) = 0;
+protected:
+    RecordReader(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_verbosity(verbosity) {}
+
+    const FileConfig& m_config;
+    VerbosityLevel m_verbosity;
+};
+
+class TextLineReader : public RecordReader {
+public:
+    TextLineReader(const FileConfig& config, std::ifstream& inFile,
+                  VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordReader(config, verbosity), m_inFile(inFile) {}
+
+    bool getNextRecord(std::vector<uint8_t>& record) override {
+        std::string line;
+        if (!std::getline(m_inFile, line)) {
+            return false;
+        }
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        record.assign(line.begin(), line.end());
+        return true;
+    }
+
+private:
+    std::ifstream& m_inFile;
+};
+
+class BinaryFixedReader : public RecordReader {
+public:
+    BinaryFixedReader(const FileConfig& config, std::ifstream& inFile,
+                     VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordReader(config, verbosity), m_inFile(inFile) {}
+
+    bool getNextRecord(std::vector<uint8_t>& record) override {
+        record.resize(m_config.lrecl);
+        if (!m_inFile.read(reinterpret_cast<char*>(record.data()), m_config.lrecl)) {
+            return false;
+        }
+        return true;
+    }
+
+private:
+    std::ifstream& m_inFile;
+};
+
+class BinaryVariableReader : public RecordReader {
+public:
+    BinaryVariableReader(const FileConfig& config, std::ifstream& inFile,
+                        VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordReader(config, verbosity), m_inFile(inFile) {}
+
+    bool getNextRecord(std::vector<uint8_t>& record) override {
+        // Read RDW
+        uint8_t rdw[4];
+        if (!m_inFile.read(reinterpret_cast<char*>(rdw), 4)) {
+            return false;
+        }
+
+        // Get record length from RDW (includes RDW size)
+        uint16_t recordLength = (rdw[0] << 8) | rdw[1];
+        if (recordLength < 4) {
+            throw std::runtime_error("Invalid RDW length in binary VB file");
+        }
+
+        // Read the complete record (including RDW)
+        record.resize(recordLength);
+        std::copy(rdw, rdw + 4, record.begin());
+        if (!m_inFile.read(reinterpret_cast<char*>(record.data() + 4), recordLength - 4)) {
+            throw std::runtime_error("Unexpected end of file while reading VB record");
+        }
+
+        return true;
+    }
+
+private:
+    std::ifstream& m_inFile;
+};
+
+static std::unique_ptr<RecordReader> createReader(const FileConfig& config,
+                                               std::ifstream& inFile,
+                                               VerbosityLevel verbosity) {
+   if (config.binary) {
+       if (config.recordFormat == 'V') {
+           return std::make_unique<BinaryVariableReader>(config, inFile, verbosity);
+       } else {
+           return std::make_unique<BinaryFixedReader>(config, inFile, verbosity);
+       }
+   } else {
+       return std::make_unique<TextLineReader>(config, inFile, verbosity);
+   }
+}
+
+class RecordFormatter {
+public:
+    virtual ~RecordFormatter() = default;
+    virtual std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) = 0;
+
+protected:
+    RecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : m_config(config), m_verbosity(verbosity) {}
+
+    const FileConfig& m_config;
+    VerbosityLevel m_verbosity;
+};
+
+class FixedRecordFormatter : public RecordFormatter {
+public:
+    FixedRecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordFormatter(config, verbosity) {}
+
+    std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) override {
+        std::vector<uint8_t> formattedRecord(m_config.lrecl, 0x40);  // Initialize with EBCDIC spaces
+
+        if (m_config.binary) {
+            // Binary data - just validate length
+            if (rawData.size() != m_config.lrecl) {
+                throw std::runtime_error("Binary record length mismatch");
+            }
+            return rawData;
+        } else {
+            // Text data - convert to EBCDIC and pad
+            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            std::copy(ebcdicData.begin(),
+                     ebcdicData.begin() + std::min(ebcdicData.size(), formattedRecord.size()),
+                     formattedRecord.begin());
+            return formattedRecord;
+        }
+    }
+};
+
+class VariableRecordFormatter : public RecordFormatter {
+public:
+    VariableRecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordFormatter(config, verbosity) {}
+
+    std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) override {
+        if (m_config.binary) {
+            // Binary VB - validate RDW structure
+            if (rawData.size() < 4) {
+                throw std::runtime_error("Binary VB record too short for RDW");
+            }
+
+            uint16_t recordLength = (rawData[0] << 8) | rawData[1];
+            if (recordLength != rawData.size()) {
+                throw std::runtime_error("Binary VB record length mismatch with RDW");
+            }
+            if (recordLength > m_config.lrecl) {
+                throw std::runtime_error("Binary VB record exceeds LRECL");
+            }
+
+            // RDW structure is valid, pass through
+            return rawData;
+        } else {
+            // Text data - create RDW and convert to EBCDIC
+            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            uint16_t recordLength = ebcdicData.size() + 4;  // Add RDW size
+
+            if (recordLength > m_config.lrecl) {
+                throw std::runtime_error("Text record length would exceed LRECL");
+            }
+
+            std::vector<uint8_t> formattedRecord(recordLength);
+            // Add RDW
+            formattedRecord[0] = recordLength >> 8;    // Length high byte
+            formattedRecord[1] = recordLength;         // Length low byte
+            formattedRecord[2] = 0;                    // Flags
+            formattedRecord[3] = 0;                    // Reserved
+
+            // Copy EBCDIC data after RDW
+            std::copy(ebcdicData.begin(), ebcdicData.end(),
+                     formattedRecord.begin() + 4);
+
+            return formattedRecord;
+        }
+    }
+};
+
+class SpannedRecordFormatter : public RecordFormatter {
+public:
+    SpannedRecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+        : RecordFormatter(config, verbosity) {}
+
+    std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) override {
+        if (m_config.binary) {
+            // Binary VS/VBS - validate and pass through
+            if (rawData.size() < 4) {
+                throw std::runtime_error("Binary VS record too short for SDW");
+            }
+
+            uint16_t recordLength = (rawData[0] << 8) | rawData[1];
+            if (recordLength != rawData.size()) {
+                throw std::runtime_error("Binary VS record length mismatch with SDW");
+            }
+            if (recordLength > m_config.lrecl) {
+                throw std::runtime_error("Binary VS record exceeds LRECL");
+            }
+
+            // Validate segment control code
+            uint8_t segmentControl = rawData[2] & 0x03;
+            if (segmentControl > 0x03) {
+                throw std::runtime_error("Invalid segment control code in VS record");
+            }
+
+            return rawData;
+        } else {
+            // Text data - create spanned record structure
+            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            uint16_t recordLength = ebcdicData.size() + 4;  // Add SDW size
+
+            std::vector<uint8_t> formattedRecord(recordLength);
+            // Add SDW
+            formattedRecord[0] = recordLength >> 8;    // Length high byte
+            formattedRecord[1] = recordLength;         // Length low byte
+            formattedRecord[2] = 0;                    // Complete logical record (0b00)
+            formattedRecord[3] = 0;                    // Reserved
+
+            // Copy EBCDIC data after SDW
+            std::copy(ebcdicData.begin(), ebcdicData.end(),
+                     formattedRecord.begin() + 4);
+
+            return formattedRecord;
+        }
+    }
+};
+
+static std::unique_ptr<RecordFormatter> createFormatter(const FileConfig& config,
+                                                      VerbosityLevel verbosity) {
+    if (config.recfm.find('S') != std::string::npos) {
+        return std::make_unique<SpannedRecordFormatter>(config, verbosity);
+    } else if (config.recordFormat == 'V') {
+        return std::make_unique<VariableRecordFormatter>(config, verbosity);
+    } else if (config.recordFormat == 'F') {
+        return std::make_unique<FixedRecordFormatter>(config, verbosity);
+    }
+    throw std::runtime_error("Unsupported record format: " + config.recfm);
 }
 
 // Record processing abstractions
@@ -660,7 +1025,7 @@ private:
     void writeVolumeLabel() {
         std::cout << "Writing VOL1 label" << std::endl;
         std::string label = createVOL1Label();
-        writeBlock(utf8ToEbcdic(label), 0xA0, true);
+        writeBlock(EbcdicUtil::utf8ToEbcdic(label), 0xA0, true);
     }
 
     void writeFile(FileConfig& config, int fileNumber) {
@@ -677,8 +1042,8 @@ private:
         std::string hdr1 = createHDR1Label(config, fileNumber);
         std::string hdr2 = createHDR2Label(config);
 
-        writeBlock(utf8ToEbcdic(hdr1), 0xA0, true);
-        writeBlock(utf8ToEbcdic(hdr2), 0xA0, true);
+        writeBlock(EbcdicUtil::utf8ToEbcdic(hdr1), 0xA0, true);
+        writeBlock(EbcdicUtil::utf8ToEbcdic(hdr2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -688,55 +1053,18 @@ private:
         }
 
         std::ifstream inFile(config.inputFile, config.binary ? std::ios::binary : std::ios::in);
+        auto reader = createReader(config, inFile, m_verbosity);
+        auto formatter = createFormatter(config, m_verbosity);
         auto processor = createRecordProcessor(config, m_verbosity);
 
-        if (config.binary) {
-            if (config.recordFormat == 'V') {
-                // Handle binary VB format (reading existing RDWs)
-                while (inFile) {
-                    uint8_t rdw[4];
-                    if (!inFile.read(reinterpret_cast<char*>(rdw), 4)) {
-                        break;
-                    }
-                    uint16_t recordLength = (rdw[0] << 8) | rdw[1];
-                    if (recordLength < 4) {
-                        throw std::runtime_error("Invalid RDW length in binary VB file");
-                    }
-                    std::vector<uint8_t> record(recordLength);
-                    std::copy(rdw, rdw + 4, record.begin());
-                    if (!inFile.read(reinterpret_cast<char*>(record.data() + 4), recordLength - 4)) {
-                        throw std::runtime_error("Unexpected end of file while reading VB record");
-                    }
-                    auto blocks = processor->processRecord(record);
-                    for (const auto& block : blocks) {
-                        writeBlock(block, 0xA0);
-                        m_blockCount++;
-                    }
-                }
-            } else {
-                // Handle binary F/FB format
-                std::vector<uint8_t> record(config.lrecl);
-                while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
-                    auto blocks = processor->processRecord(record);
-                    for (const auto& block : blocks) {
-                        writeBlock(block, 0xA0);
-                        m_blockCount++;
-                    }
-                }
-            }
-        } else {
-            // Handle text format
-            std::string line;
-            while (std::getline(inFile, line)) {
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
-                auto ebcdicData = utf8ToEbcdic(line);
-                auto blocks = processor->processRecord(ebcdicData);
-                for (const auto& block : blocks) {
-                    writeBlock(block, 0xA0);
-                    m_blockCount++;
-                }
+        std::vector<uint8_t> rawRecord;
+        while (reader->getNextRecord(rawRecord)) {
+            auto formattedRecord = formatter->formatRecord(rawRecord);
+            auto blocks = processor->processRecord(formattedRecord);
+
+            for (const auto& block : blocks) {
+                writeBlock(block, 0xA0);
+                m_blockCount++;
             }
         }
 
@@ -755,8 +1083,8 @@ private:
         writeTapeMark();
         std::string eof1 = createEOF1Label(config, fileNumber);
         std::string eof2 = createEOF2Label(config);
-        writeBlock(utf8ToEbcdic(eof1), 0xA0, true);
-        writeBlock(utf8ToEbcdic(eof2), 0xA0, true);
+        writeBlock(EbcdicUtil::utf8ToEbcdic(eof1), 0xA0, true);
+        writeBlock(EbcdicUtil::utf8ToEbcdic(eof2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -785,66 +1113,6 @@ private:
         AwsTapeBlockHeader header = {0, m_prevBlockSize, 0x40, 0};
         m_outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
         m_prevBlockSize = 0;
-    }
-
-    std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
-        std::vector<uint8_t> ebcdic;
-        ebcdic.reserve(input.size());
-
-        // Use string length instead of NUL termination
-        const uint8_t* pString = reinterpret_cast<const uint8_t*>(input.data());
-        const uint8_t* pEnd = pString + input.length();
-
-        while (pString < pEnd) {
-            const uint8_t* p = pString;
-            uint8_t t = utf8_FirstByte[*p];
-            if (UTF8_CONTINUE <= t) {
-                // Unexpected/malformed byte.
-                ebcdic.push_back(static_cast<uint8_t>(EBCDIC_SUB));
-                ++pString;
-                continue;
-            }
-
-            int iState = TR_CP031_START_STATE;
-
-            do {
-                unsigned char ch = *p++;
-                unsigned char iColumn = tr_cp031_itt[ch];
-                unsigned short iOffset = tr_cp031_sot[iState];
-
-                for (;;) {
-                    int y = tr_cp031_sbt[iOffset];
-                    if (y < 128) {
-                        // RUN phrase
-                        if (iColumn < y) {
-                            iState = tr_cp031_sbt[iOffset+1];
-                            break;
-                        } else {
-                            iColumn = static_cast<unsigned char>(iColumn - y);
-                            iOffset += 2;
-                        }
-                    } else {
-                        // COPY phrase
-                        y = 256-y;
-                        if (iColumn < y) {
-                            iState = tr_cp031_sbt[iOffset+iColumn+1];
-                            break;
-                        } else {
-                            iColumn = static_cast<unsigned char>(iColumn - y);
-                            iOffset = static_cast<unsigned short>(iOffset + y + 1);
-                        }
-                    }
-                }
-            } while (iState < TR_CP031_ACCEPTING_STATES_START);
-
-            // Convert state to EBCDIC value
-            ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
-
-            // Move to next UTF-8 sequence
-            pString = pString + t;
-        }
-
-        return ebcdic;
     }
 
     std::string padRight(const std::string& str, size_t length) {
