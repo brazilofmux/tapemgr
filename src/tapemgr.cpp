@@ -41,20 +41,59 @@ enum class VerbosityLevel {
 };
 
 enum class OperationMode {
-    Create,     // Create a tape
-    Extract,    // Extract files using JSON config
-    Init,       // Create JSON template from tape
-    Scan,       // Just examine the tape
+    Create,     // Create a tape from files (was maketape)
+    Extract,    // Extract files from tape using JSON config
+    Scan,       // Examine tape without extraction
+    Init,       // Create JSON template from tape for later extraction
 };
 
 struct ProgramOptions {
     VerbosityLevel verbosity = VerbosityLevel::Normal;
     OperationMode mode = OperationMode::Scan;
-    std::vector<std::string> inputFiles;
-    std::string configFile;
-    std::string volser;
-    std::string outputFile;
+
+    // Common options
+    std::string configFile;    // Used by create & extract
+    std::vector<std::string> inputFiles;  // Input tape(s) for scan/extract/init,
+
+    // Create-specific options
+    std::string volser;        // Volume serial for create
+    std::string outputFile;    // Output tape file for create
+    std::string ownerCode;     // Optional owner code for create
+
+    // Extract-specific options
+    std::string outputDir;     // Optional directory for extracted files
 };
+
+const struct option COMMON_OPTIONS[] = {
+    {"verbose", no_argument, 0, 'v'},
+    {"help", no_argument, 0, 'h'},
+    {"config", required_argument, 0, 'c'},
+    {0, 0, 0, 0}
+};
+
+void showUsage(const char* progName) {
+    std::cout << "Usage: " << progName << " <command> [options] <files...>\n"
+              << "\nCommands:\n"
+              << "  create    Create an AWS tape file from input files\n"
+              << "  extract   Extract files from an AWS tape using JSON config\n"
+              << "  scan      Display contents of AWS tape file(s)\n"
+              << "  init      Create JSON template from tape for later extraction\n"
+              << "\nCommon Options:\n"
+              << "  -v, --verbose     Increase verbosity (can be used multiple times)\n"
+              << "  -h, --help        Show command-specific help\n"
+              << "  -c, --config=FILE Configuration file (required for create/extract)\n"
+              << "\nCreate Options:\n"
+              << "  --volser=VOL      Volume serial number (required)\n"
+              << "  --owner=OWNER     Owner code (default: TAPEOWNR)\n"
+              << "  -o, --output=FILE Output tape file (required)\n"
+              << "\nExtract Options:\n"
+              << "  -d, --dir=DIR     Output directory for extracted files\n"
+              << "\nExamples:\n"
+              << "  " << progName << " create --volser=VOL001 -o tape.aws -c files.json input1.txt input2.dat\n"
+              << "  " << progName << " extract -c config.json tape.aws\n"
+              << "  " << progName << " scan tape.aws\n"
+              << "  " << progName << " init -o config.json tape.aws\n";
+}
 
 struct FileConfig {
     std::string inputFile;
@@ -298,45 +337,45 @@ private:
 class VariableRecordProcessor : public RecordProcessor {
 public:
     VariableRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
-    
+
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> records;
-        
+
         // Skip BDW (first 4 bytes of block)
         size_t offset = 4;
-        
+
         while (offset < blockData.size()) {
             // Get RDW
             if (offset + 4 > blockData.size()) {
                 throw std::runtime_error("Incomplete RDW at end of block");
             }
-            
+
             // Extract record length from RDW
             uint16_t recordLength = (blockData[offset] << 8) | blockData[offset + 1];
             if (recordLength < 4) {
                 throw std::runtime_error("Invalid RDW length");
             }
-            
+
             // Validate record fits in block
             if (offset + recordLength > blockData.size()) {
                 throw std::runtime_error("Record extends beyond block boundary");
             }
-            
+
             // Extract just the data portion (skip RDW)
             std::vector<uint8_t> record(blockData.begin() + offset + 4,
                                       blockData.begin() + offset + recordLength);
             records.push_back(std::move(record));
-            
+
             offset += recordLength;
         }
-        
+
         return records;
     }
-    
+
     std::vector<std::vector<uint8_t>> flush() override {
         return {}; // Variable records don't span blocks
     }
-    
+
 private:
     uint16_t m_maxRecordLength;
 };
@@ -345,51 +384,51 @@ private:
 class SpannedRecordProcessor : public RecordProcessor {
 public:
     SpannedRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
-    
+
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> completeRecords;
-        
+
         // Skip BDW
         size_t offset = 4;
-        
+
         while (offset < blockData.size()) {
             // Get SDW
             if (offset + 4 > blockData.size()) {
                 throw std::runtime_error("Incomplete SDW at end of block");
             }
-            
+
             // Extract segment length and control information from SDW
             uint16_t segmentLength = (blockData[offset] << 8) | blockData[offset + 1];
             uint8_t segmentControl = blockData[offset + 2] & 0x03;
-            
+
             if (segmentLength < 4) {
                 throw std::runtime_error("Invalid SDW length");
             }
-            
+
             // Validate segment fits in block
             if (offset + segmentLength > blockData.size()) {
                 throw std::runtime_error("Segment extends beyond block boundary");
             }
-            
+
             // Process segment (skipping SDW) based on control bits
             processSegment(blockData, offset + 4, segmentLength - 4, segmentControl, completeRecords);
-            
+
             offset += segmentLength;
         }
-        
+
         return completeRecords;
     }
-    
+
     std::vector<std::vector<uint8_t>> flush() override {
         std::vector<std::vector<uint8_t>> records;
-        
+
         if (!m_currentRecord.empty()) {
             throw std::runtime_error("Incomplete spanned record at end of file");
         }
-        
+
         return records;
     }
-    
+
 private:
     void processSegment(const std::vector<uint8_t>& blockData, size_t offset, size_t length,
                        uint8_t segmentControl, std::vector<std::vector<uint8_t>>& completeRecords) {
@@ -399,7 +438,7 @@ private:
                     blockData.begin() + offset,
                     blockData.begin() + offset + length));
                 break;
-                
+
             case 0b01: // First segment
                 if (!m_currentRecord.empty()) {
                     throw std::runtime_error("First segment received while processing previous record");
@@ -408,7 +447,7 @@ private:
                                      blockData.begin() + offset,
                                      blockData.begin() + offset + length);
                 break;
-                
+
             case 0b10: // Last segment
                 if (m_currentRecord.empty()) {
                     throw std::runtime_error("Last segment received without first segment");
@@ -419,7 +458,7 @@ private:
                 completeRecords.push_back(std::move(m_currentRecord));
                 m_currentRecord.clear();
                 break;
-                
+
             case 0b11: // Middle segment
                 if (m_currentRecord.empty()) {
                     throw std::runtime_error("Middle segment received without first segment");
@@ -430,7 +469,7 @@ private:
                 break;
         }
     }
-    
+
     uint16_t m_maxRecordLength;
     std::vector<uint8_t> m_currentRecord;
 };
@@ -474,7 +513,7 @@ public:
         while (!ascii.empty() && ascii.back() == ' ') {
             ascii.pop_back();
         }
-        
+
         // Convert to vector<uint8_t> and add newline
         std::vector<uint8_t> result(ascii.begin(), ascii.end());
         result.push_back('\n');
@@ -1455,162 +1494,6 @@ bool AwsTapeDumper::extractFiles(const json& config) {
     }
 
     return success;
-}
-
-void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
-    static struct option long_options[] = {
-        {"verbose", no_argument, 0, 'v'},
-        {"help", no_argument, 0, 'h'},
-        {"scan", no_argument, 0, 's'},
-        {"init", no_argument, 0, 'i'},
-        {"extract", required_argument, 0, 'e'},
-        {0, 0, 0, 0}
-    };
-
-    int opt;
-    int option_index = 0;
-    bool mode_set = false;
-
-    while ((opt = getopt_long(argc, argv, "vhsie:", long_options, &option_index)) != -1) {
-        switch (opt) {
-            case 'v':
-                if (options.verbosity < VerbosityLevel::Debug) {
-                    options.verbosity = static_cast<VerbosityLevel>(static_cast<int>(options.verbosity) + 1);
-                }
-                break;
-            case 'h':
-                std::cout << "Usage: " << argv[0] << " [OPTIONS] file1 [file2 ...]\n"
-                         << "Options:\n"
-                         << "  -v, --verbose     Increase verbosity (can be used multiple times)\n"
-                         << "  -s, --scan        Scan tape contents (default mode)\n"
-                         << "  -i, --init        Create JSON configuration template\n"
-                         << "  -e, --extract=FILE Extract files using JSON configuration\n"
-                         << "  -h, --help        Display this help message\n"
-                         << "\nModes:\n"
-                         << "  scan   - Examine tape contents without creating output\n"
-                         << "  init   - Create JSON template for later extraction\n"
-                         << "  extract - Extract files according to JSON configuration\n"
-                         << std::endl;
-                exit(0);
-            case 's':
-                if (mode_set) {
-                    std::cerr << "Error: Only one mode can be specified\n";
-                    exit(1);
-                }
-                options.mode = OperationMode::Scan;
-                mode_set = true;
-                break;
-            case 'i':
-                if (mode_set) {
-                    std::cerr << "Error: Only one mode can be specified\n";
-                    exit(1);
-                }
-                options.mode = OperationMode::Init;
-                mode_set = true;
-                break;
-            case 'e':
-                if (mode_set) {
-                    std::cerr << "Error: Only one mode can be specified\n";
-                    exit(1);
-                }
-                options.mode = OperationMode::Extract;
-                options.configFile = optarg;
-                mode_set = true;
-                break;
-            default:
-                std::cerr << "Unknown option. Use --help for usage information.\n";
-                exit(1);
-        }
-    }
-
-    // Collect input files
-    for (int i = optind; i < argc; i++) {
-        options.inputFiles.push_back(argv[i]);
-    }
-
-    if (options.inputFiles.empty()) {
-        std::cerr << "Error: No input files specified. Use --help for usage information.\n";
-        exit(1);
-    }
-
-    // Validate options based on mode
-    if (options.mode == OperationMode::Extract && options.configFile.empty()) {
-        std::cerr << "Error: Extract mode requires a configuration file\n";
-        exit(1);
-    }
-}
-
-// Updated main function
-int main(int argc, char* argv[]) {
-    ProgramOptions options;
-    parseCommandLine(argc, argv, options);
-
-    try {
-        switch (options.mode) {
-            case OperationMode::Scan:
-            case OperationMode::Init: {
-                for (const auto& inputFile : options.inputFiles) {
-                    AwsTapeDumper tapeDumper(inputFile, options.verbosity);
-
-                    if (!tapeDumper.scanTape()) {
-                        std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
-                        continue;
-                    }
-
-                    if (options.mode == OperationMode::Init) {
-                        std::string configFile = inputFile + ".json";
-                        tapeDumper.writeConfig(configFile);
-                        if (options.verbosity >= VerbosityLevel::Normal) {
-                            std::cout << "Configuration template written to: " << configFile << std::endl;
-                        }
-                    }
-
-                    if (options.verbosity >= VerbosityLevel::Detailed) {
-                        auto files = tapeDumper.getFiles();
-                        for (const auto& file : files) {
-                            std::cout << "  Dataset: " << file.datasetName << std::endl;
-                            std::cout << "    Record Format: " << file.recordFormat
-                                     << " Block Attribute: " << file.blockAttribute << std::endl;
-                            std::cout << "    Block Size: " << file.blockSize
-                                     << " Record Length: " << file.recordLength << std::endl;
-                            std::cout << "    Block Count: " << file.blockCount << std::endl;
-                        }
-                    }
-                }
-                break;
-            }
-
-            case OperationMode::Extract: {
-                if (options.inputFiles.size() != 1) {
-                    std::cerr << "Error: Extract mode requires exactly one input tape file" << std::endl;
-                    return 1;
-                }
-
-                std::string error;
-                json config = AwsTapeDumper::loadConfig(options.configFile, error);
-                if (config.is_null()) {
-                    std::cerr << "Error loading configuration: " << error << std::endl;
-                    return 1;
-                }
-
-                AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity);
-                if (!tapeDumper.extractFiles(config)) {
-                    std::cerr << "Error: Some files failed to extract" << std::endl;
-                    return 1;
-                }
-
-                if (options.verbosity >= VerbosityLevel::Normal) {
-                    std::cout << "All files extracted successfully" << std::endl;
-                }
-                break;
-            }
-        }
-
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
 }
 
 int calculateOptimalBlksize(int lrecl)
@@ -2777,17 +2660,48 @@ void readConfigFile(const std::string& filename, std::vector<FileConfig>& config
     }
 }
 
-void parseCommandLine2(int argc, char* argv[], ProgramOptions& options) {
+OperationMode parseCommand(const std::string& cmd) {
+    if (cmd == "create") return OperationMode::Create;
+    if (cmd == "extract") return OperationMode::Extract;
+    if (cmd == "scan") return OperationMode::Scan;
+    if (cmd == "init") return OperationMode::Init;
+    throw std::runtime_error("Unknown command: " + cmd);
+}
+
+void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
+    if (argc < 2) {
+        showUsage(argv[0]);
+        exit(1);
+    }
+
+    // First argument after program name should be the command
+    try {
+        options.mode = parseCommand(argv[1]);
+    } catch (const std::runtime_error& e) {
+        std::cerr << e.what() << "\nUse --help for usage information.\n";
+        exit(1);
+    }
+
+    // Skip program name and command for getopt
+    optind = 2;
+
+    // Define common and command-specific options
     static struct option long_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
+        {"config", required_argument, 0, 'c'},
+        {"volser", required_argument, 0, 'V'},
+        {"owner", required_argument, 0, 'w'},
+        {"output", required_argument, 0, 'o'},
+        {"dir", required_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
+    std::string optstring = "vhc:o:d:";
     int opt;
     int option_index = 0;
 
-    while ((opt = getopt_long(argc, argv, "vh", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, optstring.c_str(), long_options, &option_index)) != -1) {
         switch (opt) {
             case 'v':
                 if (options.verbosity < VerbosityLevel::Debug) {
@@ -2795,46 +2709,184 @@ void parseCommandLine2(int argc, char* argv[], ProgramOptions& options) {
                 }
                 break;
             case 'h':
-                std::cout << "Usage: " << argv[0] << " [-v] [-vv] [-vvv] [--verbose] [--help] volser output_file config_file" << std::endl;
-                std::cout << "  -v, --verbose  Increase verbosity (can be used multiple times)" << std::endl;
-                std::cout << "  -h, --help     Display this help message" << std::endl;
+                showUsage(argv[0]);
                 exit(0);
+            case 'c':
+                options.configFile = optarg;
+                break;
+            case 'V':
+                options.volser = optarg;
+                break;
+            case 'w':
+                options.ownerCode = optarg;
+                break;
+            case 'o':
+                options.outputFile = optarg;
+                break;
+            case 'd':
+                options.outputDir = optarg;
+                break;
             default:
-                std::cerr << "Unknown option. Use --help for usage information." << std::endl;
+                std::cerr << "Unknown option. Use --help for usage information.\n";
                 exit(1);
         }
     }
 
-    // Need exactly 3 non-option arguments
-    if (argc - optind != 3) {
-        std::cerr << "Error: Need volser, output file, and config file arguments" << std::endl;
-        std::cerr << "Use --help for usage information." << std::endl;
-        exit(1);
+    // Collect remaining arguments as input files
+    while (optind < argc) {
+        options.inputFiles.push_back(argv[optind++]);
     }
 
-    options.volser = argv[optind];
-    options.outputFile = argv[optind + 1];
-    options.configFile = argv[optind + 2];
+    // Validate options based on mode
+    switch (options.mode) {
+        case OperationMode::Create:
+            if (options.volser.empty()) {
+                std::cerr << "Error: --volser is required for create mode\n";
+                exit(1);
+            }
+            if (options.outputFile.empty()) {
+                std::cerr << "Error: --output is required for create mode\n";
+                exit(1);
+            }
+            if (options.configFile.empty()) {
+                std::cerr << "Error: --config is required for create mode\n";
+                exit(1);
+            }
+            break;
+
+        case OperationMode::Extract:
+            if (options.configFile.empty()) {
+                std::cerr << "Error: --config is required for extract mode\n";
+                exit(1);
+            }
+            if (options.inputFiles.empty()) {
+                std::cerr << "Error: Input tape file required for extract mode\n";
+                exit(1);
+            }
+            break;
+
+        case OperationMode::Scan:
+        case OperationMode::Init:
+            if (options.inputFiles.empty()) {
+                std::cerr << "Error: Input tape file(s) required\n";
+                exit(1);
+            }
+            break;
+    }
 }
 
-// Modified main function
-int main2(int argc, char* argv[]) {
+int main(int argc, char* argv[]) {
     try {
         ProgramOptions options;
         parseCommandLine(argc, argv, options);
 
-        std::vector<FileConfig> configs;
-        readConfigFile(options.configFile, configs);
+        switch (options.mode) {
+            case OperationMode::Create: {
+                // Create mode (former maketape functionality)
+                if (options.verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "Creating AWS tape file: " << options.outputFile << std::endl;
+                }
 
-        AwsTapeMaker tapeMaker(options.volser, options.outputFile, "TAPEOWNER", "MAJESTY/MAKETAPE", options.verbosity);
-        for (const auto& config : configs) {
-            tapeMaker.addFile(config);
+                std::string error;
+                json config = AwsTapeDumper::loadConfig(options.configFile, error);
+                if (config.is_null()) {
+                    throw std::runtime_error("Error loading configuration: " + error);
+                }
+
+                AwsTapeMaker tapeMaker(options.volser, options.outputFile,
+                                     options.ownerCode.empty() ? "TAPEOWNER" : options.ownerCode,
+                                     "TAPEMGR/CREATE", options.verbosity);
+
+                for (const auto& fileConfig : config["files"]) {
+                    FileConfig fc;
+                    fc.inputFile = fileConfig["local_file"].get<std::string>();
+                    fc.datasetName = fileConfig["dataset_name"].get<std::string>();
+                    fc.recfm = fileConfig["record_format"].get<std::string>();
+                    fc.recordFormat = fc.recfm[0];  // F, V, or U
+                    fc.lrecl = fileConfig["record_length"].get<uint16_t>();
+                    fc.blksize = fileConfig["block_size"].get<uint16_t>();
+                    fc.binary = fileConfig.value("binary", false);
+
+                    // Set block attribute
+                    fc.blockAttribute = ' ';
+                    if (fc.recfm.find('B') != std::string::npos) {
+                        fc.blockAttribute = 'B';  // Blocked
+                    }
+                    if (fc.recfm.find('S') != std::string::npos) {
+                        fc.blockAttribute = (fc.blockAttribute == 'B') ? 'R' : 'S';  // Spanned or Blocked and Spanned
+                    }
+
+                    tapeMaker.addFile(fc);
+                }
+                tapeMaker.writeTape();
+
+                if (options.verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "AWS tape file created successfully: " << options.outputFile << std::endl;
+                }
+                break;
+            }
+
+            case OperationMode::Extract: {
+                // Extract mode (former dumptape extract functionality)
+                if (options.inputFiles.size() != 1) {
+                    throw std::runtime_error("Extract mode requires exactly one input tape file");
+                }
+
+                std::string error;
+                json config = AwsTapeDumper::loadConfig(options.configFile, error);
+                if (config.is_null()) {
+                    throw std::runtime_error("Error loading configuration: " + error);
+                }
+
+                AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity);
+                if (!tapeDumper.extractFiles(config)) {
+                    throw std::runtime_error("Some files failed to extract");
+                }
+
+                if (options.verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "All files extracted successfully" << std::endl;
+                }
+                break;
+            }
+
+            case OperationMode::Scan:
+            case OperationMode::Init: {
+                // Scan/Init mode (former dumptape scan/init functionality)
+                for (const auto& inputFile : options.inputFiles) {
+                    AwsTapeDumper tapeDumper(inputFile, options.verbosity);
+
+                    if (!tapeDumper.scanTape()) {
+                        std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
+                        continue;
+                    }
+
+                    if (options.mode == OperationMode::Init) {
+                        std::string configFile = options.outputFile.empty() ?
+                                               inputFile + ".json" : options.outputFile;
+                        tapeDumper.writeConfig(configFile);
+                        if (options.verbosity >= VerbosityLevel::Normal) {
+                            std::cout << "Configuration template written to: " << configFile << std::endl;
+                        }
+                    }
+
+                    if (options.verbosity >= VerbosityLevel::Detailed) {
+                        auto files = tapeDumper.getFiles();
+                        for (const auto& file : files) {
+                            std::cout << "  Dataset: " << file.datasetName << std::endl;
+                            std::cout << "    Record Format: " << file.recordFormat
+                                     << " Block Attribute: " << file.blockAttribute << std::endl;
+                            std::cout << "    Block Size: " << file.blockSize
+                                     << " Record Length: " << file.recordLength << std::endl;
+                            std::cout << "    Block Count: " << file.blockCount << std::endl;
+                        }
+                    }
+                }
+                break;
+            }
         }
-        tapeMaker.writeTape();
-
-        std::cout << "AWS tape file created successfully: " << options.outputFile << std::endl;
 
         return 0;
+
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
