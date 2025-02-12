@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <getopt.h>
@@ -156,7 +157,6 @@ void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     }
 }
 
-
 class AwsTapeDumper {
 public:
     AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbosity = VerbosityLevel::Normal);
@@ -177,6 +177,12 @@ public:
 
     // Writes configuration to a file
     void writeConfig(const std::string& filename) const;
+
+    // Schema validation
+    static bool validateConfig(const json& config, std::string& error);
+
+    // Config loading
+    static json loadConfig(const std::string& filename, std::string& error);
 
 private:
     // Internal processing methods
@@ -536,6 +542,190 @@ void AwsTapeDumper::writeConfig(const std::string& filename) const {
     out << config.dump(4) << std::endl;
 }
 
+bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
+    try {
+        // Check required top-level fields
+        if (!config.contains("volume_serial")) {
+            error = "Missing required field 'volume_serial'";
+            return false;
+        }
+        if (!config.contains("files")) {
+            error = "Missing required field 'files'";
+            return false;
+        }
+
+        // Validate volume_serial
+        if (!config["volume_serial"].is_string()) {
+            error = "Field 'volume_serial' must be a string";
+            return false;
+        }
+        std::string volser = config["volume_serial"];
+        if (volser.length() > 6 || !std::all_of(volser.begin(), volser.end(),
+            [](char c) { return std::isupper(c) || std::isdigit(c); })) {
+            error = "Invalid volume_serial format. Must be 1-6 uppercase letters or numbers";
+            return false;
+        }
+
+        // Validate owner_code if present
+        if (config.contains("owner_code")) {
+            if (!config["owner_code"].is_string()) {
+                error = "Field 'owner_code' must be a string";
+                return false;
+            }
+            std::string owner = config["owner_code"];
+            if (owner.length() > 10 || !std::all_of(owner.begin(), owner.end(),
+                [](char c) { return std::isupper(c) || std::isdigit(c); })) {
+                error = "Invalid owner_code format. Must be 1-10 uppercase letters or numbers";
+                return false;
+            }
+        }
+
+        // Validate files array
+        if (!config["files"].is_array()) {
+            error = "Field 'files' must be an array";
+            return false;
+        }
+
+        const std::set<std::string> validRecFM = {"F", "FB", "V", "VB", "VS", "VBS", "U"};
+
+        for (const auto& file : config["files"]) {
+            // Check required fields
+            for (const auto& field : {"dataset_name", "record_format", "record_length", "block_size"}) {
+                if (!file.contains(field)) {
+                    error = std::string("Missing required field '") + field + "' in file entry";
+                    return false;
+                }
+            }
+
+            // Validate dataset_name
+            if (!file["dataset_name"].is_string()) {
+                error = "Field 'dataset_name' must be a string";
+                return false;
+            }
+            std::string dsn = file["dataset_name"];
+            if (dsn.length() > 17 || !std::all_of(dsn.begin(), dsn.end(),
+                [](char c) { return std::isupper(c) || std::isdigit(c) || c == '.'; })) {
+                error = "Invalid dataset_name format. Must be 1-17 uppercase letters, numbers, or periods";
+                return false;
+            }
+
+            // Validate record_format
+            if (!file["record_format"].is_string()) {
+                error = "Field 'record_format' must be a string";
+                return false;
+            }
+            std::string recfm = file["record_format"];
+            if (validRecFM.find(recfm) == validRecFM.end()) {
+                error = "Invalid record_format. Must be one of: F, FB, V, VB, VS, VBS, U";
+                return false;
+            }
+
+            // Validate numeric fields
+            if (!file["record_length"].is_number_integer() ||
+                file["record_length"] < 1 || file["record_length"] > 32760) {
+                error = "record_length must be an integer between 1 and 32760";
+                return false;
+            }
+
+            if (!file["block_size"].is_number_integer() ||
+                file["block_size"] < 1 || file["block_size"] > 32760) {
+                error = "block_size must be an integer between 1 and 32760";
+                return false;
+            }
+
+            // Validate record format specific rules
+            int reclen = file["record_length"];
+            int blksize = file["block_size"];
+
+            if (recfm == "F" && blksize != reclen) {
+                error = "For F format, block size must equal record length";
+                return false;
+            }
+
+            if (recfm == "FB" && (blksize % reclen != 0)) {
+                error = "For FB format, block size must be a multiple of record length";
+                return false;
+            }
+
+            // Validate local_file if present (required for extraction)
+            if (file.contains("local_file")) {
+                if (!file["local_file"].is_string()) {
+                    error = "Field 'local_file' must be a string";
+                    return false;
+                }
+                if (file["local_file"].get<std::string>().empty()) {
+                    error = "Local file name must be specified for extraction";
+                    return false;
+                }
+            }
+
+            // Validate binary flag if present
+            if (file.contains("binary") && !file["binary"].is_boolean()) {
+                error = "Field 'binary' must be a boolean";
+                return false;
+            }
+
+            // Validate dates if present
+            auto validateDate = [&error](const json& file, const char* field) {
+                if (file.contains(field)) {
+                    if (!file[field].is_string()) {
+                        error = std::string("Field '") + field + "' must be a string";
+                        return false;
+                    }
+                    std::string date = file[field];
+                    if (date.length() != 6 || !std::all_of(date.begin(), date.end(),
+                        [](char c) { return std::isdigit(c); })) {
+                        error = std::string("Invalid ") + field + " format. Must be 6 digits (CYYDDD)";
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            if (!validateDate(file, "creation_date") || !validateDate(file, "expiration_date")) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    catch (const json::exception& e) {
+        error = std::string("JSON validation error: ") + e.what();
+        return false;
+    }
+    catch (const std::exception& e) {
+        error = std::string("Validation error: ") + e.what();
+        return false;
+    }
+}
+
+json AwsTapeDumper::loadConfig(const std::string& filename, std::string& error) {
+    try {
+        std::ifstream f(filename);
+        if (!f.is_open()) {
+            error = "Unable to open configuration file: " + filename;
+            return json();
+        }
+
+        json config = json::parse(f);
+
+        // Validate the loaded configuration
+        if (!validateConfig(config, error)) {
+            return json();
+        }
+
+        return config;
+    }
+    catch (const json::parse_error& e) {
+        error = std::string("JSON parse error: ") + e.what();
+        return json();
+    }
+    catch (const std::exception& e) {
+        error = std::string("Error loading configuration: ") + e.what();
+        return json();
+    }
+}
+
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
     m_currentVolser = ebcdicToAsciiString(label.volumeSerial, 6);
 
@@ -749,11 +939,20 @@ int main(int argc, char* argv[]) {
             }
 
             case OperationMode::Extract: {
-                // TODO: Implement extraction mode
-                // 1. Load and validate JSON config
-                // 2. Create appropriate record processors
-                // 3. Extract files according to config
-                std::cout << "Extract mode not yet implemented" << std::endl;
+                std::string error;
+                json config = AwsTapeDumper::loadConfig(options.configFile, error);
+                if (config.is_null()) {
+                    std::cerr << "Error loading configuration: " << error << std::endl;
+                    return 1;
+                }
+
+                if (options.verbosity >= VerbosityLevel::Normal) {
+                    std::cout << "Configuration validated successfully." << std::endl;
+                    std::cout << "Found " << config["files"].size() << " files to extract." << std::endl;
+                }
+
+                // TODO: Proceed with extraction using validated config
+                std::cout << "Extract mode validation complete. Extraction not yet implemented." << std::endl;
                 break;
             }
         }
