@@ -2331,9 +2331,9 @@ static std::unique_ptr<RecordFormatter> createFormatter(const FileConfig& config
 }
 
 // Record processing abstractions
-class RecordProcessor2 {
+class BlockProcessor {
 public:
-    virtual ~RecordProcessor2() = default;
+    virtual ~BlockProcessor() = default;
 
     // Main entry point for processing a record
     virtual std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) = 0;
@@ -2404,9 +2404,9 @@ private:
     VerbosityLevel m_verbosity;
 };
 
-class FixedRecordProcessor2 : public RecordProcessor2 {
+class FixedBlockProcessor : public BlockProcessor {
 public:
-    FixedRecordProcessor2(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+    FixedBlockProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
         : m_config(config), m_blockBuilder(config.blksize, false, verbosity) {
         m_verbosity = verbosity;
     }
@@ -2451,9 +2451,9 @@ private:
     BlockBuilder m_blockBuilder;
 };
 
-class VariableRecordProcessor2 : public RecordProcessor2 {
+class VariableBlockProcessor : public BlockProcessor {
 public:
-    VariableRecordProcessor2(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+    VariableBlockProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
         : m_config(config), m_blockBuilder(config.blksize, true, verbosity) {
         m_verbosity = verbosity;
     }
@@ -2508,9 +2508,9 @@ private:
     BlockBuilder m_blockBuilder;
 };
 
-class SpannedRecordProcessor2 : public RecordProcessor2 {
+class SpannedBlockProcessor : public BlockProcessor {
 public:
-    SpannedRecordProcessor2(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
+    SpannedBlockProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
         : m_config(config), m_blockBuilder(config.blksize, true, verbosity) {
         m_verbosity = verbosity;
     }
@@ -2577,13 +2577,13 @@ private:
     BlockBuilder m_blockBuilder;
 };
 
-static std::unique_ptr<RecordProcessor2> createRecordProcessor(const FileConfig& config, VerbosityLevel verbosity) {
+static std::unique_ptr<BlockProcessor> createRecordProcessor(const FileConfig& config, VerbosityLevel verbosity) {
     if (config.recfm.find('S') != std::string::npos) {
-        return std::make_unique<SpannedRecordProcessor2>(config, verbosity);
+        return std::make_unique<SpannedBlockProcessor>(config, verbosity);
     } else if (config.recordFormat == 'V') {
-        return std::make_unique<VariableRecordProcessor2>(config, verbosity);
+        return std::make_unique<VariableBlockProcessor>(config, verbosity);
     } else if (config.recordFormat == 'F') {
-        return std::make_unique<FixedRecordProcessor2>(config, verbosity);
+        return std::make_unique<FixedBlockProcessor>(config, verbosity);
     }
     throw std::runtime_error("Unsupported record format: " + config.recfm);
 }
