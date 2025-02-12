@@ -756,16 +756,14 @@ private:
                     recordCount++;
                 }
             } else {
-#if 0
+                std::vector<uint8_t> record(config.lrecl);
                 while (inFile.read(reinterpret_cast<char*>(record.data()), config.lrecl)) {
                     auto completeBlocks = blockBuilder.addRecord(record);
                     for (const auto& block : completeBlocks) {
                         writeBlock(block, 0xA0);
                         m_blockCount++;
                     }
-                    recordCount++;
                 }
-#endif
             }
         } else {
             // Handle text format - existing code
