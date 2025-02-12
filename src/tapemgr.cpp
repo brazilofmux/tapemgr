@@ -184,39 +184,6 @@ using EOV1Label = HDR1Label;
 using EOF2Label = HDR2Label;
 using EOV2Label = HDR2Label;
 
-// EBCDIC to ASCII conversion table
-const unsigned char ebcdicToAsciiTable[] = {
-    "\x00\x01\x02\x03\xA6\x09\xA7\x7F\xA9\xB0\xB1\x0B\x0C\x0D\x0E\x0F"
-    "\x10\x11\x12\x13\xB2\xB4\x08\xB7\x18\x19\x1A\xB8\xBA\x1D\xBB\x1F"
-    "\xBD\xC0\x1C\xC1\xC2\x0A\x17\x1B\xC3\xC4\xC5\xC6\xC7\x05\x06\x07"
-    "\xC8\xC9\x16\xCB\xCC\x1E\xCD\x04\xCE\xD0\xD1\xD2\x14\x15\xD3\xFC"
-    "\x20\xD4\x83\x84\x85\xA0\xD5\x86\x87\xA4\xD6\x2E\x3C\x28\x2B\xD7"
-    "\x26\x82\x88\x89\x8A\xA1\x8C\x8B\x8D\xD8\x21\x24\x2A\x29\x3B\x5E"
-    "\x2D\x2F\xD9\x8E\xDB\xDC\xDD\x8F\x80\xA5\x7C\x2C\x25\x5F\x3E\x3F"
-    "\xDE\x90\xDF\xE0\xE2\xE3\xE4\xE5\xE6\x60\x3A\x23\x40\x27\x3D\x22"
-    "\xE7\x61\x62\x63\x64\x65\x66\x67\x68\x69\xAE\xAF\xE8\xE9\xEA\xEC"
-    "\xF0\x6A\x6B\x6C\x6D\x6E\x6F\x70\x71\x72\xF1\xF2\x91\xF3\x92\xF4"
-    "\xF5\x7E\x73\x74\x75\x76\x77\x78\x79\x7A\xAD\xA8\xF6\x5B\xF7\xF8"
-    "\x9B\x9C\x9D\x9E\x9F\xB5\xB6\xAC\xAB\xB9\xAA\xB3\xBC\x5D\xBE\xBF"
-    "\x7B\x41\x42\x43\x44\x45\x46\x47\x48\x49\xCA\x93\x94\x95\xA2\xCF"
-    "\x7D\x4A\x4B\x4C\x4D\x4E\x4F\x50\x51\x52\xDA\x96\x81\x97\xA3\x98"
-    "\x5C\xE1\x53\x54\x55\x56\x57\x58\x59\x5A\xFD\xEB\x99\xED\xEE\xEF"
-    "\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\xFE\xFB\x9A\xF9\xFA\xFF"
-};
-
-std::string trimRight(const std::string& str) {
-    size_t end = str.find_last_not_of(" ");
-    return (end == std::string::npos) ? "" : str.substr(0, end + 1);
-}
-
-std::string ebcdicToAsciiString(const unsigned char* ebcdicStr, size_t length) {
-    std::string result(length, ' ');
-    for (size_t i = 0; i < length; ++i) {
-        result[i] = ebcdicToAsciiTable[ebcdicStr[i]];
-    }
-    return trimRight(result);
-}
-
 void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     if (verbosity >= VerbosityLevel::Detailed) {
         std::cout << "Block Header:" << std::endl;
@@ -238,6 +205,536 @@ void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
         std::cout << std::dec << std::endl;
     }
 }
+
+class EbcdicUtil {
+public:
+    static std::vector<uint8_t> utf8ToEbcdic(const std::vector<uint8_t>& input) {
+        std::vector<uint8_t> ebcdic;
+        ebcdic.reserve(input.size());
+
+        const uint8_t* pString = input.data();
+        const uint8_t* pEnd = pString + input.size();
+
+        while (pString < pEnd) {
+            const uint8_t* p = pString;
+            uint8_t t = utf8_FirstByte[*p];
+            if (UTF8_CONTINUE <= t) {
+                ebcdic.push_back(static_cast<uint8_t>(EBCDIC_SUB));
+                ++pString;
+                continue;
+            }
+
+            int iState = TR_CP031_START_STATE;
+
+            do {
+                unsigned char ch = *p++;
+                unsigned char iColumn = tr_cp031_itt[ch];
+                unsigned short iOffset = tr_cp031_sot[iState];
+
+                for (;;) {
+                    int y = tr_cp031_sbt[iOffset];
+                    if (y < 128) {
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset += 2;
+                        }
+                    } else {
+                        y = 256-y;
+                        if (iColumn < y) {
+                            iState = tr_cp031_sbt[iOffset+iColumn+1];
+                            break;
+                        } else {
+                            iColumn = static_cast<unsigned char>(iColumn - y);
+                            iOffset = static_cast<unsigned short>(iOffset + y + 1);
+                        }
+                    }
+                }
+            } while (iState < TR_CP031_ACCEPTING_STATES_START);
+
+            ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
+            pString = pString + t;
+        }
+
+        return ebcdic;
+    }
+
+    static std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
+        return utf8ToEbcdic(std::vector<uint8_t>(input.begin(), input.end()));
+    }
+
+    static std::vector<uint8_t> ebcdicToUtf8(const unsigned char* ebcdicStr, size_t length) {
+        // Pre-calculate maximum possible size to avoid reallocations
+        std::vector<uint8_t> result;
+        size_t maxSize = 0;
+        for (size_t i = 0; i < length; i++) {
+            maxSize += ebcdicToUtf8Lengths[ebcdicStr[i]];
+        }
+        result.reserve(maxSize);
+
+        // Do the conversion using our pre-calculated tables
+        for (size_t i = 0; i < length; i++) {
+            unsigned char eb = ebcdicStr[i];
+            uint8_t utf8_len = ebcdicToUtf8Lengths[eb];
+            if (utf8_len > 0) {
+                result.insert(result.end(),
+                            ebcdicToUtf8Bytes[eb],
+                            ebcdicToUtf8Bytes[eb] + utf8_len);
+            }
+        }
+        return result;
+    }
+
+    // Convert to string with optional trimming
+    static std::string ebcdicToUtf8String(const unsigned char* ebcdicStr, size_t length, bool trim = false) {
+        auto utf8Bytes = ebcdicToUtf8(ebcdicStr, length);
+        if (!trim) {
+            return std::string(utf8Bytes.begin(), utf8Bytes.end());
+        }
+
+        // Find last non-space character
+        auto it = utf8Bytes.rbegin();
+        while (it != utf8Bytes.rend()) {
+            // Check for UTF-8 space (0x20) or EBCDIC space (0x40)
+            if (*it != 0x20 && *it != 0x40) {
+                break;
+            }
+            ++it;
+        }
+
+        return std::string(utf8Bytes.begin(), utf8Bytes.end() - (it - utf8Bytes.rbegin()));
+    }
+
+    // Convenience overload for vectors
+    static std::string ebcdicToUtf8String(const std::vector<uint8_t>& ebcdicData, bool trim = false) {
+        return ebcdicToUtf8String(ebcdicData.data(), ebcdicData.size(), trim);
+    }
+
+    static char ebcdicToAscii(unsigned char eb) {
+        static const char asciiChars[] = {
+            /* 0x40 */ ' ',
+            /* 0x42 */ 'B',
+            /* 0x46 */ 'F',
+            /* 0x52 */ 'R',
+            /* 0x53 */ 'S',
+            /* 0x55 */ 'U',
+            /* 0x56 */ 'V'
+        };
+        static const unsigned char ebcdicChars[] = {
+            /* space */ 0x40,
+            /* B */     0xC2,
+            /* F */     0xC6,
+            /* R */     0xD9,
+            /* S */     0xE2,
+            /* U */     0xE4,
+            /* V */     0xE5
+        };
+
+        // Simple linear search (only 7 elements, probably faster than binary search)
+        for (size_t i = 0; i < sizeof(ebcdicChars); i++) {
+            if (eb == ebcdicChars[i]) {
+                return asciiChars[i];
+            }
+        }
+        return '?';  // Invalid/unknown character
+    }
+
+private:
+    static const unsigned char utf8_FirstByte[256];
+    static const unsigned char tr_cp031_itt[256];
+    static const unsigned short tr_cp031_sot[3];
+    static const unsigned short tr_cp031_sbt[271];
+    static const uint8_t ebcdicToUtf8Lengths[256];
+    static const uint8_t ebcdicToUtf8Bytes[256][2];
+};
+
+// This will help decode UTF-8 sequences.
+//
+// 0xxxxxxx ==> 00000000-01111111 ==> 00-7F 1 byte sequence.
+// 10xxxxxx ==> 10000000-10111111 ==> 80-BF continue
+// 110xxxxx ==> 11000000-11011111 ==> C0-DF 2 byte sequence.
+// 1110xxxx ==> 11100000-11101111 ==> E0-EF 3 byte sequence.
+// 11110xxx ==> 11110000-11110111 ==> F0-F7 4 byte sequence.
+//              11111000-11111111 illegal
+//
+// Also, RFC 3629 specifies that 0xC0, 0xC1, and 0xF5-0xFF never
+// appear in a valid sequence.
+//
+// The first byte gives the length of a sequence (UTF8_SIZE1 - UTF8_SIZE4).
+// Bytes in the middle of a sequence map to UTF8_CONTINUE.  Bytes which should
+// not appear map to UTF8_ILLEGAL.
+//
+const unsigned char EbcdicUtil::utf8_FirstByte[256] = {
+//  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
+//
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 0
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 1
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 2
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 3
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 4
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 5
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 6
+    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 7
+
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 8
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 9
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // A
+    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // B
+    6,  6,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // C
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // D
+    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
+    4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
+};
+
+// utf/tr_utf8_cp037.txt
+//
+// 255 code points.
+// 3 states, 193 columns, 804 bytes
+//
+const unsigned char EbcdicUtil::tr_cp031_itt[256] =
+{
+       0,   1,   2,   3,   4,   5,   6,   7,    8,   9,  10,  11,  12,  13,  14,  15,
+      16,  17,  18,  19,  20,  21,  22,  23,   24,  25,  13,  26,  27,  28,  29,  30,
+      31,  32,  33,  34,  35,  36,  37,  38,   39,  40,  41,  42,  43,  44,  45,  46,
+      47,  48,  49,  50,  51,  52,  53,  54,   55,  56,  57,  58,  59,  60,  61,  62,
+      63,  64,  65,  66,  67,  68,  69,  70,   71,  72,  73,  74,  75,  76,  77,  78,
+      79,  80,  81,  82,  83,  84,  85,  86,   87,  88,  89,  90,  91,  92,  93,  94,
+      95,  96,  97,  98,  99, 100, 101, 102,  103, 104, 105, 106, 107, 108, 109, 110,
+     111, 112, 113, 114, 115, 116, 117, 118,  119, 120, 121, 122, 123, 124, 125, 126,
+
+     127, 128, 129, 130, 131, 132, 133, 134,  135, 136, 137, 138, 139, 140, 141, 142,
+     143, 144, 145, 146, 147, 148, 149, 150,  151, 152, 153, 154, 155, 156, 157, 158,
+     159, 160, 161, 162, 163, 164, 165, 166,  167, 168, 169, 170, 171, 172, 173, 174,
+     175, 176, 177, 178, 179, 180, 181, 182,  183, 184, 185, 186, 187, 188, 189, 190,
+      13,  13, 191, 192,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
+      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13
+
+};
+
+const unsigned short EbcdicUtil::tr_cp031_sot[3] =
+{
+        0,  133,  202
+};
+
+const unsigned short EbcdicUtil::tr_cp031_sbt[271] =
+{
+     129,   3,   4,   5,   6,  58,  48,  49,   50,  25,   8,  16,  14,  15,  66,  17,
+      18,  19,  20,  21,  22,  63,  64,  53,   41,  27,  28,  42,  31,  32,  33,  34,
+      67,  93, 130, 126,  94, 111,  83, 128,   80,  96,  95,  81, 110,  99,  78, 100,
+     243, 244, 245, 246, 247, 248, 249, 250,  251, 252, 125,  97,  79, 129, 113, 114,
+     127, 196, 197, 198, 199, 200, 201, 202,  203, 204, 212, 213, 214, 215, 216, 217,
+     218, 219, 220, 229, 230, 231, 232, 233,  234, 235, 236, 189, 227, 190, 179, 112,
+     124, 132, 133, 134, 135, 136, 137, 138,  139, 140, 148, 149, 150, 151, 152, 153,
+     154, 155, 156, 165, 166, 167, 168, 169,  170, 171, 172, 195,  82, 211, 164,  10,
+      64,  66, 254,   1,   2, 127,  66, 192,   35,  36,  37,  38,  39,  24,   9,  26,
+      43,  44,  45,  46,  47,  12,  13,  30,   51,  52,  29,  54,  55,  56,  57,  11,
+      59,  60,  61,  62,   7,  23,  65, 258,   68, 173,  77, 180, 162, 181, 109, 184,
+     192, 183, 157, 141,  98, 205, 178, 191,  147, 146, 237, 253, 193, 163, 185, 182,
+     160, 221, 158, 142, 186, 187, 188, 174,    2,  66, 127,  66, 192, 103, 104, 101,
+     105, 102, 106, 161, 107, 119, 116, 117,  118, 123, 120, 121, 122, 175, 108, 240,
+     241, 238, 242, 239, 194, 131, 256, 257,  254, 255, 176, 177,  92,  71,  72,  69,
+      73,  70,  74, 159,  75,  87,  84,  85,   86,  91,  88,  89,  90, 143,  76, 208,
+     209, 206, 210, 207, 228, 115, 224, 225,  222, 223, 144, 145, 226,   2,  66
+};
+
+const uint8_t EbcdicUtil::ebcdicToUtf8Lengths[256] = {
+    1, 1, 1, 1, 2, 1, 2, 1,
+    2, 2, 2, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 2, 2, 1, 2,
+    1, 1, 2, 2, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 1, 1, 1,
+    2, 2, 2, 2, 2, 1, 1, 1,
+    2, 2, 1, 2, 2, 2, 2, 1,
+    2, 2, 2, 2, 1, 1, 2, 1,
+    1, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 1, 1, 1, 1, 1,
+    1, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 1, 1, 1, 1, 1, 2,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    1, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 1, 1, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    1, 2, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 2, 2,
+
+};
+
+const uint8_t EbcdicUtil::ebcdicToUtf8Bytes[256][2] = {
+    {0x00, 0},  // 0x00
+    {0x01, 0},  // 0x01
+    {0x02, 0},  // 0x02
+    {0x03, 0},  // 0x03
+    {0xC2, 0x9C},  // 0x04
+    {0x09, 0},  // 0x05
+    {0xC2, 0x86},  // 0x06
+    {0x7F, 0},  // 0x07
+    {0xC2, 0x97},  // 0x08
+    {0xC2, 0x8D},  // 0x09
+    {0xC2, 0x8E},  // 0x0A
+    {0x0B, 0},  // 0x0B
+    {0x0C, 0},  // 0x0C
+    {0x0D, 0},  // 0x0D
+    {0x0E, 0},  // 0x0E
+    {0x0F, 0},  // 0x0F
+    {0x10, 0},  // 0x10
+    {0x11, 0},  // 0x11
+    {0x12, 0},  // 0x12
+    {0x13, 0},  // 0x13
+    {0xC2, 0x9D},  // 0x14
+    {0xC2, 0x85},  // 0x15
+    {0x08, 0},  // 0x16
+    {0xC2, 0x87},  // 0x17
+    {0x18, 0},  // 0x18
+    {0x19, 0},  // 0x19
+    {0xC2, 0x92},  // 0x1A
+    {0xC2, 0x8F},  // 0x1B
+    {0x1C, 0},  // 0x1C
+    {0x1D, 0},  // 0x1D
+    {0x1E, 0},  // 0x1E
+    {0x1F, 0},  // 0x1F
+    {0xC2, 0x80},  // 0x20
+    {0xC2, 0x81},  // 0x21
+    {0xC2, 0x82},  // 0x22
+    {0xC2, 0x83},  // 0x23
+    {0xC2, 0x84},  // 0x24
+    {0x0A, 0},  // 0x25
+    {0x17, 0},  // 0x26
+    {0x1B, 0},  // 0x27
+    {0xC2, 0x88},  // 0x28
+    {0xC2, 0x89},  // 0x29
+    {0xC2, 0x8A},  // 0x2A
+    {0xC2, 0x8B},  // 0x2B
+    {0xC2, 0x8C},  // 0x2C
+    {0x05, 0},  // 0x2D
+    {0x06, 0},  // 0x2E
+    {0x07, 0},  // 0x2F
+    {0xC2, 0x90},  // 0x30
+    {0xC2, 0x91},  // 0x31
+    {0x16, 0},  // 0x32
+    {0xC2, 0x93},  // 0x33
+    {0xC2, 0x94},  // 0x34
+    {0xC2, 0x95},  // 0x35
+    {0xC2, 0x96},  // 0x36
+    {0x04, 0},  // 0x37
+    {0xC2, 0x98},  // 0x38
+    {0xC2, 0x99},  // 0x39
+    {0xC2, 0x9A},  // 0x3A
+    {0xC2, 0x9B},  // 0x3B
+    {0x14, 0},  // 0x3C
+    {0x15, 0},  // 0x3D
+    {0xC2, 0x9E},  // 0x3E
+    {0x1A, 0},  // 0x3F
+    {0x20, 0},  // 0x40
+    {0xC2, 0xA0},  // 0x41
+    {0xC3, 0xA2},  // 0x42
+    {0xC3, 0xA4},  // 0x43
+    {0xC3, 0xA0},  // 0x44
+    {0xC3, 0xA1},  // 0x45
+    {0xC3, 0xA3},  // 0x46
+    {0xC3, 0xA5},  // 0x47
+    {0xC3, 0xA7},  // 0x48
+    {0xC3, 0xB1},  // 0x49
+    {0xC2, 0xA2},  // 0x4A
+    {0x2E, 0},  // 0x4B
+    {0x3C, 0},  // 0x4C
+    {0x28, 0},  // 0x4D
+    {0x2B, 0},  // 0x4E
+    {0x7C, 0},  // 0x4F
+    {0x26, 0},  // 0x50
+    {0xC3, 0xA9},  // 0x51
+    {0xC3, 0xAA},  // 0x52
+    {0xC3, 0xAB},  // 0x53
+    {0xC3, 0xA8},  // 0x54
+    {0xC3, 0xAD},  // 0x55
+    {0xC3, 0xAE},  // 0x56
+    {0xC3, 0xAF},  // 0x57
+    {0xC3, 0xAC},  // 0x58
+    {0xC3, 0x9F},  // 0x59
+    {0x21, 0},  // 0x5A
+    {0x24, 0},  // 0x5B
+    {0x2A, 0},  // 0x5C
+    {0x29, 0},  // 0x5D
+    {0x3B, 0},  // 0x5E
+    {0xC2, 0xAC},  // 0x5F
+    {0x2D, 0},  // 0x60
+    {0x2F, 0},  // 0x61
+    {0xC3, 0x82},  // 0x62
+    {0xC3, 0x84},  // 0x63
+    {0xC3, 0x80},  // 0x64
+    {0xC3, 0x81},  // 0x65
+    {0xC3, 0x83},  // 0x66
+    {0xC3, 0x85},  // 0x67
+    {0xC3, 0x87},  // 0x68
+    {0xC3, 0x91},  // 0x69
+    {0xC2, 0xA6},  // 0x6A
+    {0x2C, 0},  // 0x6B
+    {0x25, 0},  // 0x6C
+    {0x5F, 0},  // 0x6D
+    {0x3E, 0},  // 0x6E
+    {0x3F, 0},  // 0x6F
+    {0xC3, 0xB8},  // 0x70
+    {0xC3, 0x89},  // 0x71
+    {0xC3, 0x8A},  // 0x72
+    {0xC3, 0x8B},  // 0x73
+    {0xC3, 0x88},  // 0x74
+    {0xC3, 0x8D},  // 0x75
+    {0xC3, 0x8E},  // 0x76
+    {0xC3, 0x8F},  // 0x77
+    {0xC3, 0x8C},  // 0x78
+    {0x60, 0},  // 0x79
+    {0x3A, 0},  // 0x7A
+    {0x23, 0},  // 0x7B
+    {0x40, 0},  // 0x7C
+    {0x27, 0},  // 0x7D
+    {0x3D, 0},  // 0x7E
+    {0x22, 0},  // 0x7F
+    {0xC3, 0x98},  // 0x80
+    {0x61, 0},  // 0x81
+    {0x62, 0},  // 0x82
+    {0x63, 0},  // 0x83
+    {0x64, 0},  // 0x84
+    {0x65, 0},  // 0x85
+    {0x66, 0},  // 0x86
+    {0x67, 0},  // 0x87
+    {0x68, 0},  // 0x88
+    {0x69, 0},  // 0x89
+    {0xC2, 0xAB},  // 0x8A
+    {0xC2, 0xBB},  // 0x8B
+    {0xC3, 0xB0},  // 0x8C
+    {0xC3, 0xBD},  // 0x8D
+    {0xC3, 0xBE},  // 0x8E
+    {0xC2, 0xB1},  // 0x8F
+    {0xC2, 0xB0},  // 0x90
+    {0x6A, 0},  // 0x91
+    {0x6B, 0},  // 0x92
+    {0x6C, 0},  // 0x93
+    {0x6D, 0},  // 0x94
+    {0x6E, 0},  // 0x95
+    {0x6F, 0},  // 0x96
+    {0x70, 0},  // 0x97
+    {0x71, 0},  // 0x98
+    {0x72, 0},  // 0x99
+    {0xC2, 0xAA},  // 0x9A
+    {0xC2, 0xBA},  // 0x9B
+    {0xC3, 0xA6},  // 0x9C
+    {0xC2, 0xB8},  // 0x9D
+    {0xC3, 0x86},  // 0x9E
+    {0xC2, 0xA4},  // 0x9F
+    {0xC2, 0xB5},  // 0xA0
+    {0x7E, 0},  // 0xA1
+    {0x73, 0},  // 0xA2
+    {0x74, 0},  // 0xA3
+    {0x75, 0},  // 0xA4
+    {0x76, 0},  // 0xA5
+    {0x77, 0},  // 0xA6
+    {0x78, 0},  // 0xA7
+    {0x79, 0},  // 0xA8
+    {0x7A, 0},  // 0xA9
+    {0xC2, 0xA1},  // 0xAA
+    {0xC2, 0xBF},  // 0xAB
+    {0xC3, 0x90},  // 0xAC
+    {0xC3, 0x9D},  // 0xAD
+    {0xC3, 0x9E},  // 0xAE
+    {0xC2, 0xAE},  // 0xAF
+    {0x5E, 0},  // 0xB0
+    {0xC2, 0xA3},  // 0xB1
+    {0xC2, 0xA5},  // 0xB2
+    {0xC2, 0xB7},  // 0xB3
+    {0xC2, 0xA9},  // 0xB4
+    {0xC2, 0xA7},  // 0xB5
+    {0xC2, 0xB6},  // 0xB6
+    {0xC2, 0xBC},  // 0xB7
+    {0xC2, 0xBD},  // 0xB8
+    {0xC2, 0xBE},  // 0xB9
+    {0x5B, 0},  // 0xBA
+    {0x5D, 0},  // 0xBB
+    {0xC2, 0xAF},  // 0xBC
+    {0xC2, 0xA8},  // 0xBD
+    {0xC2, 0xB4},  // 0xBE
+    {0xC3, 0x97},  // 0xBF
+    {0x7B, 0},  // 0xC0
+    {0x41, 0},  // 0xC1
+    {0x42, 0},  // 0xC2
+    {0x43, 0},  // 0xC3
+    {0x44, 0},  // 0xC4
+    {0x45, 0},  // 0xC5
+    {0x46, 0},  // 0xC6
+    {0x47, 0},  // 0xC7
+    {0x48, 0},  // 0xC8
+    {0x49, 0},  // 0xC9
+    {0xC2, 0xAD},  // 0xCA
+    {0xC3, 0xB4},  // 0xCB
+    {0xC3, 0xB6},  // 0xCC
+    {0xC3, 0xB2},  // 0xCD
+    {0xC3, 0xB3},  // 0xCE
+    {0xC3, 0xB5},  // 0xCF
+    {0x7D, 0},  // 0xD0
+    {0x4A, 0},  // 0xD1
+    {0x4B, 0},  // 0xD2
+    {0x4C, 0},  // 0xD3
+    {0x4D, 0},  // 0xD4
+    {0x4E, 0},  // 0xD5
+    {0x4F, 0},  // 0xD6
+    {0x50, 0},  // 0xD7
+    {0x51, 0},  // 0xD8
+    {0x52, 0},  // 0xD9
+    {0xC2, 0xB9},  // 0xDA
+    {0xC3, 0xBB},  // 0xDB
+    {0xC3, 0xBC},  // 0xDC
+    {0xC3, 0xB9},  // 0xDD
+    {0xC3, 0xBA},  // 0xDE
+    {0xC3, 0xBF},  // 0xDF
+    {0x5C, 0},  // 0xE0
+    {0xC3, 0xB7},  // 0xE1
+    {0x53, 0},  // 0xE2
+    {0x54, 0},  // 0xE3
+    {0x55, 0},  // 0xE4
+    {0x56, 0},  // 0xE5
+    {0x57, 0},  // 0xE6
+    {0x58, 0},  // 0xE7
+    {0x59, 0},  // 0xE8
+    {0x5A, 0},  // 0xE9
+    {0xC2, 0xB2},  // 0xEA
+    {0xC3, 0x94},  // 0xEB
+    {0xC3, 0x96},  // 0xEC
+    {0xC3, 0x92},  // 0xED
+    {0xC3, 0x93},  // 0xEE
+    {0xC3, 0x95},  // 0xEF
+    {0x30, 0},  // 0xF0
+    {0x31, 0},  // 0xF1
+    {0x32, 0},  // 0xF2
+    {0x33, 0},  // 0xF3
+    {0x34, 0},  // 0xF4
+    {0x35, 0},  // 0xF5
+    {0x36, 0},  // 0xF6
+    {0x37, 0},  // 0xF7
+    {0x38, 0},  // 0xF8
+    {0x39, 0},  // 0xF9
+    {0xC2, 0xB3},  // 0xFA
+    {0xC3, 0x9B},  // 0xFB
+    {0xC3, 0x9C},  // 0xFC
+    {0xC3, 0x99},  // 0xFD
+    {0xC3, 0x9A},  // 0xFE
+    {0xC2, 0x9F},  // 0xFF
+};
 
 // Block reading abstraction
 class BlockReader {
@@ -508,14 +1005,11 @@ protected:
 class TextRecordTransformer : public RecordTransformer {
 public:
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
-        // Convert EBCDIC to ASCII and trim trailing spaces
-        std::string ascii = ebcdicToAsciiString(record.data(), record.size());
-        while (!ascii.empty() && ascii.back() == ' ') {
-            ascii.pop_back();
-        }
+        // Convert EBCDIC to Unicode and trim trailing spaces
+        std::string unicode = EbcdicUtil::ebcdicToUtf8String(record.data(), record.size(), true);
 
         // Convert to vector<uint8_t> and add newline
-        std::vector<uint8_t> result(ascii.begin(), ascii.end());
+        std::vector<uint8_t> result(unicode.begin(), unicode.end());
         result.push_back('\n');
         return result;
     }
@@ -914,7 +1408,7 @@ bool AwsTapeDumper::scanTape() {
         }
 
         if (header.curblkl > 0) {
-            std::string labelIdentifier = ebcdicToAsciiString(buffer.data(), 4);
+            std::string labelIdentifier = EbcdicUtil::ebcdicToUtf8String(buffer.data(), 4, true);
 
             if (labelIdentifier == "VOL1") {
                 const VOL1Label* vol1 = reinterpret_cast<const VOL1Label*>(buffer.data());
@@ -1372,38 +1866,38 @@ json AwsTapeDumper::loadConfig(const std::string& filename, std::string& error) 
 }
 
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
-    m_currentVolser = ebcdicToAsciiString(label.volumeSerial, 6);
+    m_currentVolser = EbcdicUtil::ebcdicToUtf8String(label.volumeSerial, 6, true);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "VOL1 Label found" << std::endl;
         std::cout << "  Volume Serial: " << m_currentVolser << std::endl;
-        std::cout << "  Owner Code: " << ebcdicToAsciiString(label.ownerCode, 10) << std::endl;
+        std::cout << "  Owner Code: " << EbcdicUtil::ebcdicToUtf8String(label.ownerCode, 10, true) << std::endl;
     }
 }
 
 void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
-    m_currentFile.datasetName = ebcdicToAsciiString(label.dataSetIdentifier, 17);
-    m_currentFile.volumeSerial = ebcdicToAsciiString(label.dataSetSerialNumber, 6);
+    m_currentFile.datasetName = EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true);
+    m_currentFile.volumeSerial = EbcdicUtil::ebcdicToUtf8String(label.dataSetSerialNumber, 6, true);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "HDR1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << m_currentFile.datasetName << std::endl;
         std::cout << "  Dataset Serial Number: " << m_currentFile.volumeSerial << std::endl;
-        std::cout << "  Volume Sequence Number: " << ebcdicToAsciiString(label.volumeSequenceNumber, 4) << std::endl;
-        std::cout << "  Dataset Sequence Number: " << ebcdicToAsciiString(label.dataSetSequenceNumber, 4) << std::endl;
-        std::cout << "  Creation Date: " << ebcdicToAsciiString(label.creationDate, 6) << std::endl;
-        std::cout << "  Expiration Date: " << ebcdicToAsciiString(label.expirationDate, 6) << std::endl;
-        std::cout << "  Dataset Security: " << ebcdicToAsciiTable[label.dataSetSecurity] << std::endl;
+        std::cout << "  Volume Sequence Number: " << EbcdicUtil::ebcdicToUtf8String(label.volumeSequenceNumber, 4, true) << std::endl;
+        std::cout << "  Dataset Sequence Number: " << EbcdicUtil::ebcdicToUtf8String(label.dataSetSequenceNumber, 4, true) << std::endl;
+        std::cout << "  Creation Date: " << EbcdicUtil::ebcdicToUtf8String(label.creationDate, 6, true) << std::endl;
+        std::cout << "  Expiration Date: " << EbcdicUtil::ebcdicToUtf8String(label.expirationDate, 6, true) << std::endl;
+        std::cout << "  Dataset Security: " << EbcdicUtil::ebcdicToUtf8String(&label.dataSetSecurity, 1) << std::endl;
     }
 }
 
 void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
-    m_currentFile.recordFormat = ebcdicToAsciiTable[label.recordFormat];
-    m_currentFile.blockAttribute = ebcdicToAsciiTable[label.blockAttribute];
+    m_currentFile.recordFormat = EbcdicUtil::ebcdicToAscii(label.recordFormat);
+    m_currentFile.blockAttribute = EbcdicUtil::ebcdicToAscii(label.blockAttribute);
 
     // Convert EBCDIC numeric strings to integers
-    std::string blksize = ebcdicToAsciiString(label.blockLength, 5);
-    std::string lrecl = ebcdicToAsciiString(label.recordLength, 5);
+    std::string blksize = EbcdicUtil::ebcdicToUtf8String(label.blockLength, 5, true);
+    std::string lrecl = EbcdicUtil::ebcdicToUtf8String(label.recordLength, 5, true);
     m_currentFile.blockSize = std::stoi(blksize);
     m_currentFile.recordLength = std::stoi(lrecl);
 
@@ -1413,19 +1907,19 @@ void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
         std::cout << "  Block Attribute: " << m_currentFile.blockAttribute << std::endl;
         std::cout << "  Block Length: " << m_currentFile.blockSize << std::endl;
         std::cout << "  Record Length: " << m_currentFile.recordLength << std::endl;
-        std::cout << "  Tape Density: " << ebcdicToAsciiTable[label.tapeDensity] << std::endl;
-        std::cout << "  Job/Step: " << ebcdicToAsciiString(label.jobStepIdentification, 17) << std::endl;
-        std::cout << "  Tape Recording Technique: " << ebcdicToAsciiString(label.tapeRecordingTechnique, 2) << std::endl;
-        std::cout << "  Control Character: " << ebcdicToAsciiTable[label.controlCharacter] << std::endl;
-        std::cout << "  Device Serial Number: " << ebcdicToAsciiString(label.deviceSerialNumber, 6) << std::endl;
+        std::cout << "  Tape Density: " << EbcdicUtil::ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
+        std::cout << "  Job/Step: " << EbcdicUtil::ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
+        std::cout << "  Tape Recording Technique: " << EbcdicUtil::ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
+        std::cout << "  Control Character: " << EbcdicUtil::ebcdicToUtf8String(&label.controlCharacter, 1) << std::endl;
+        std::cout << "  Device Serial Number: " << EbcdicUtil::ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
     }
 }
 
 void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF1 Label found" << std::endl;
-        std::cout << "  Dataset Name: " << ebcdicToAsciiString(label.dataSetIdentifier, 17) << std::endl;
-        std::string blockCount = ebcdicToAsciiString(label.blockCount, 6);
+        std::cout << "  Dataset Name: " << EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true) << std::endl;
+        std::string blockCount = EbcdicUtil::ebcdicToUtf8String(label.blockCount, 6, true);
         m_currentFile.blockCount = std::stoi(blockCount);
         std::cout << "  Block Count: " << m_currentFile.blockCount << std::endl;
     }
@@ -1434,15 +1928,15 @@ void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
 void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF2 Label found" << std::endl;
-        std::cout << "  Record Format: " << ebcdicToAsciiTable[label.recordFormat] << std::endl;
-        std::cout << "  Block Attribute: " << ebcdicToAsciiTable[label.blockAttribute] << std::endl;
-        std::cout << "  Block Length: " << ebcdicToAsciiString(label.blockLength, 5) << std::endl;
-        std::cout << "  Record Length: " << ebcdicToAsciiString(label.recordLength, 5) << std::endl;
-        std::cout << "  Tape Density: " << ebcdicToAsciiTable[label.tapeDensity] << std::endl;
-        std::cout << "  Job/Step: " << ebcdicToAsciiString(label.jobStepIdentification, 17) << std::endl;
-        std::cout << "  Tape Recording Technique: " << ebcdicToAsciiString(label.tapeRecordingTechnique, 2) << std::endl;
-        std::cout << "  Control Character: " << ebcdicToAsciiTable[label.controlCharacter] << std::endl;
-        std::cout << "  Device Serial Number: " << ebcdicToAsciiString(label.deviceSerialNumber, 6) << std::endl;
+        std::cout << "  Record Format: " << EbcdicUtil::ebcdicToUtf8String(&label.recordFormat, 1) << std::endl;
+        std::cout << "  Block Attribute: " << EbcdicUtil::ebcdicToUtf8String(&label.blockAttribute, 1) << std::endl;
+        std::cout << "  Block Length: " << EbcdicUtil::ebcdicToUtf8String(label.blockLength, 5, true) << std::endl;
+        std::cout << "  Record Length: " << EbcdicUtil::ebcdicToUtf8String(label.recordLength, 5, true) << std::endl;
+        std::cout << "  Tape Density: " << EbcdicUtil::ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
+        std::cout << "  Job/Step: " << EbcdicUtil::ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
+        std::cout << "  Tape Recording Technique: " << EbcdicUtil::ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
+        std::cout << "  Control Character: " << EbcdicUtil::ebcdicToUtf8String(&label.controlCharacter, 1)<< std::endl;
+        std::cout << "  Device Serial Number: " << EbcdicUtil::ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
     }
 }
 
@@ -1561,163 +2055,6 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
 
     return jcl.str();
 }
-
-class EbcdicUtil {
-public:
-    static std::vector<uint8_t> utf8ToEbcdic(const std::vector<uint8_t>& input) {
-        std::vector<uint8_t> ebcdic;
-        ebcdic.reserve(input.size());
-
-        const uint8_t* pString = input.data();
-        const uint8_t* pEnd = pString + input.size();
-
-        while (pString < pEnd) {
-            const uint8_t* p = pString;
-            uint8_t t = utf8_FirstByte[*p];
-            if (UTF8_CONTINUE <= t) {
-                ebcdic.push_back(static_cast<uint8_t>(EBCDIC_SUB));
-                ++pString;
-                continue;
-            }
-
-            int iState = TR_CP031_START_STATE;
-
-            do {
-                unsigned char ch = *p++;
-                unsigned char iColumn = tr_cp031_itt[ch];
-                unsigned short iOffset = tr_cp031_sot[iState];
-
-                for (;;) {
-                    int y = tr_cp031_sbt[iOffset];
-                    if (y < 128) {
-                        if (iColumn < y) {
-                            iState = tr_cp031_sbt[iOffset+1];
-                            break;
-                        } else {
-                            iColumn = static_cast<unsigned char>(iColumn - y);
-                            iOffset += 2;
-                        }
-                    } else {
-                        y = 256-y;
-                        if (iColumn < y) {
-                            iState = tr_cp031_sbt[iOffset+iColumn+1];
-                            break;
-                        } else {
-                            iColumn = static_cast<unsigned char>(iColumn - y);
-                            iOffset = static_cast<unsigned short>(iOffset + y + 1);
-                        }
-                    }
-                }
-            } while (iState < TR_CP031_ACCEPTING_STATES_START);
-
-            ebcdic.push_back(static_cast<uint8_t>(iState - TR_CP031_ACCEPTING_STATES_START));
-            pString = pString + t;
-        }
-
-        return ebcdic;
-    }
-
-    static std::vector<uint8_t> utf8ToEbcdic(const std::string& input) {
-        return utf8ToEbcdic(std::vector<uint8_t>(input.begin(), input.end()));
-    }
-
-private:
-    static const unsigned char utf8_FirstByte[256];
-    static const unsigned char tr_cp031_itt[256];
-    static const unsigned short tr_cp031_sot[3];
-    static const unsigned short tr_cp031_sbt[271];
-};
-
-// This will help decode UTF-8 sequences.
-//
-// 0xxxxxxx ==> 00000000-01111111 ==> 00-7F 1 byte sequence.
-// 10xxxxxx ==> 10000000-10111111 ==> 80-BF continue
-// 110xxxxx ==> 11000000-11011111 ==> C0-DF 2 byte sequence.
-// 1110xxxx ==> 11100000-11101111 ==> E0-EF 3 byte sequence.
-// 11110xxx ==> 11110000-11110111 ==> F0-F7 4 byte sequence.
-//              11111000-11111111 illegal
-//
-// Also, RFC 3629 specifies that 0xC0, 0xC1, and 0xF5-0xFF never
-// appear in a valid sequence.
-//
-// The first byte gives the length of a sequence (UTF8_SIZE1 - UTF8_SIZE4).
-// Bytes in the middle of a sequence map to UTF8_CONTINUE.  Bytes which should
-// not appear map to UTF8_ILLEGAL.
-//
-const unsigned char EbcdicUtil::utf8_FirstByte[256] = {
-//  0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-//
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 0
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 1
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 2
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 3
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 4
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 5
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 6
-    1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  // 7
-
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 8
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // 9
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // A
-    5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  5,  // B
-    6,  6,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // C
-    2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,  // D
-    3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  3,  // E
-    4,  4,  4,  4,  4,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6,  6   // F
-};
-
-// utf/tr_utf8_cp037.txt
-//
-// 255 code points.
-// 3 states, 193 columns, 804 bytes
-//
-const unsigned char EbcdicUtil::tr_cp031_itt[256] =
-{
-       0,   1,   2,   3,   4,   5,   6,   7,    8,   9,  10,  11,  12,  13,  14,  15,
-      16,  17,  18,  19,  20,  21,  22,  23,   24,  25,  13,  26,  27,  28,  29,  30,
-      31,  32,  33,  34,  35,  36,  37,  38,   39,  40,  41,  42,  43,  44,  45,  46,
-      47,  48,  49,  50,  51,  52,  53,  54,   55,  56,  57,  58,  59,  60,  61,  62,
-      63,  64,  65,  66,  67,  68,  69,  70,   71,  72,  73,  74,  75,  76,  77,  78,
-      79,  80,  81,  82,  83,  84,  85,  86,   87,  88,  89,  90,  91,  92,  93,  94,
-      95,  96,  97,  98,  99, 100, 101, 102,  103, 104, 105, 106, 107, 108, 109, 110,
-     111, 112, 113, 114, 115, 116, 117, 118,  119, 120, 121, 122, 123, 124, 125, 126,
-
-     127, 128, 129, 130, 131, 132, 133, 134,  135, 136, 137, 138, 139, 140, 141, 142,
-     143, 144, 145, 146, 147, 148, 149, 150,  151, 152, 153, 154, 155, 156, 157, 158,
-     159, 160, 161, 162, 163, 164, 165, 166,  167, 168, 169, 170, 171, 172, 173, 174,
-     175, 176, 177, 178, 179, 180, 181, 182,  183, 184, 185, 186, 187, 188, 189, 190,
-      13,  13, 191, 192,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
-      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
-      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13,
-      13,  13,  13,  13,  13,  13,  13,  13,   13,  13,  13,  13,  13,  13,  13,  13
-
-};
-
-const unsigned short EbcdicUtil::tr_cp031_sot[3] =
-{
-        0,  133,  202
-};
-
-const unsigned short EbcdicUtil::tr_cp031_sbt[271] =
-{
-     129,   3,   4,   5,   6,  58,  48,  49,   50,  25,   8,  16,  14,  15,  66,  17,
-      18,  19,  20,  21,  22,  63,  64,  53,   41,  27,  28,  42,  31,  32,  33,  34,
-      67,  93, 130, 126,  94, 111,  83, 128,   80,  96,  95,  81, 110,  99,  78, 100,
-     243, 244, 245, 246, 247, 248, 249, 250,  251, 252, 125,  97,  79, 129, 113, 114,
-     127, 196, 197, 198, 199, 200, 201, 202,  203, 204, 212, 213, 214, 215, 216, 217,
-     218, 219, 220, 229, 230, 231, 232, 233,  234, 235, 236, 189, 227, 190, 179, 112,
-     124, 132, 133, 134, 135, 136, 137, 138,  139, 140, 148, 149, 150, 151, 152, 153,
-     154, 155, 156, 165, 166, 167, 168, 169,  170, 171, 172, 195,  82, 211, 164,  10,
-      64,  66, 254,   1,   2, 127,  66, 192,   35,  36,  37,  38,  39,  24,   9,  26,
-      43,  44,  45,  46,  47,  12,  13,  30,   51,  52,  29,  54,  55,  56,  57,  11,
-      59,  60,  61,  62,   7,  23,  65, 258,   68, 173,  77, 180, 162, 181, 109, 184,
-     192, 183, 157, 141,  98, 205, 178, 191,  147, 146, 237, 253, 193, 163, 185, 182,
-     160, 221, 158, 142, 186, 187, 188, 174,    2,  66, 127,  66, 192, 103, 104, 101,
-     105, 102, 106, 161, 107, 119, 116, 117,  118, 123, 120, 121, 122, 175, 108, 240,
-     241, 238, 242, 239, 194, 131, 256, 257,  254, 255, 176, 177,  92,  71,  72,  69,
-      73,  70,  74, 159,  75,  87,  84,  85,   86,  91,  88,  89,  90, 143,  76, 208,
-     209, 206, 210, 207, 228, 115, 224, 225,  222, 223, 144, 145, 226,   2,  66
-};
 
 class RecordReader {
 public:
