@@ -1317,11 +1317,26 @@ public:
 
     // Combine scan and extract for better efficiency
     bool extractFiles(const json& config, bool validateOnly = false) {
+        // First scan the tape to get positions
+        if (!scanTape()) {
+            throw std::runtime_error("Failed to scan tape");
+        }
+
+        // Generate scan config
+        json scanConfig = generateConfig();
+
+        // Merge the configs
+        json mergedConfig = mergeConfigs(config, scanConfig);
+
+        if (m_verbosity >= VerbosityLevel::Debug) {
+            std::cout << "Using merged config:\n" << mergedConfig.dump(2) << std::endl;
+        }
+
         // Verify volume serial matches if specified
-        if (config.contains("volume_serial") &&
-            config["volume_serial"] != m_currentVolser) {
-            std::cerr << "Warning: Config volume serial " << config["volume_serial"]
-                     << " doesn't match tape volume " << m_currentVolser << std::endl;
+        if (mergedConfig.contains("volume_serial") &&
+            mergedConfig["volume_serial"] != m_currentVolser) {
+            std::cerr << "Warning: Config volume serial " << mergedConfig["volume_serial"]
+                      << " doesn't match tape volume " << m_currentVolser << std::endl;
         }
 
         if (validateOnly) {
@@ -1329,7 +1344,7 @@ public:
         }
 
         bool success = true;
-        for (const auto& fileConfig : config["files"]) {
+        for (const auto& fileConfig : mergedConfig["files"]) {
             try {
                 if (fileConfig["local_file"].empty()) {
                     if (m_verbosity >= VerbosityLevel::Normal) {
@@ -1343,7 +1358,7 @@ public:
 
             } catch (const std::exception& e) {
                 std::cerr << "Error extracting dataset " << fileConfig["dataset_name"]
-                         << ": " << e.what() << std::endl;
+                          << ": " << e.what() << std::endl;
                 success = false;
                 if (m_verbosity < VerbosityLevel::Detailed) {
                     break;  // Stop on first error unless detailed mode
@@ -1363,11 +1378,50 @@ public:
         return m_ownerCode;
     }
 
+    json mergeConfigs(const json& createConfig, const json& scanConfig) {
+        json merged = scanConfig;  // Start with scan data (has positions)
+
+        // For each file in scan config, find matching dataset in create config
+        for (auto& file : merged["files"]) {
+            const std::string& dsn = file["dataset_name"];
+            // Find matching file in create config
+            auto it = std::find_if(createConfig["files"].begin(),
+                                  createConfig["files"].end(),
+                                  [&dsn](const json& f) {
+                                      return f["dataset_name"] == dsn;
+                                  });
+            if (it != createConfig["files"].end()) {
+                // Copy over the output file path and any other needed fields
+                file["local_file"] = (*it)["local_file"];
+            }
+        }
+        return merged;
+    }
+
 protected:
     // Helper for extracting a single file
     void extractFile(const json& fileConfig) {
         if (m_verbosity >= VerbosityLevel::Normal) {
             std::cout << "Extracting dataset: " << fileConfig["dataset_name"] << std::endl;
+            if (m_verbosity >= VerbosityLevel::Debug) {
+                std::cout << "Using config: " << fileConfig.dump(2) << std::endl;
+            }
+        }
+
+        // Validate required fields
+        const std::vector<std::string> requiredFields = {
+            "dataset_name",
+            "local_file",
+            "record_format",
+            "record_length",
+            "block_size",
+            "file_position"  // I suspect this might be our missing field
+        };
+
+        for (const auto& field : requiredFields) {
+            if (!fileConfig.contains(field)) {
+                throw std::runtime_error("Missing required field in config: " + field);
+            }
         }
 
         // Convert position from JSON integer to streampos
@@ -2759,13 +2813,13 @@ private:
     void validateFileConfig(const FileConfig& config) {
         // Verify record format combinations
         if (config.recordFormat == 'F') {
-            if (!config.binary && config.blksize != config.lrecl) {
+            if (config.recfm == "F" && !config.binary && config.blksize != config.lrecl) {
+                // Only enforce BLKSIZE = LRECL for unblocked F records
                 throw std::runtime_error("For F format, BLKSIZE must equal LRECL");
             }
-        }
-        if (config.recfm.find('B') != std::string::npos) {
-            if (config.blksize % config.lrecl != 0) {
-                throw std::runtime_error("For blocked formats, BLKSIZE must be multiple of LRECL");
+            if (config.recfm == "FB" && config.blksize % config.lrecl != 0) {
+                // For FB, ensure BLKSIZE is multiple of LRECL
+                throw std::runtime_error("For FB format, BLKSIZE must be multiple of LRECL");
             }
         }
     }
