@@ -86,6 +86,9 @@ void showUsage(const char* progName) {
               << "  --volser=VOL      Volume serial number (required)\n"
               << "  --owner=OWNER     Owner code (default: TAPEOWNR)\n"
               << "  -o, --output=FILE Output tape file (required)\n"
+              << "  Input files can be specified either in the config file's local_file field\n"
+              << "  or as additional arguments on the command line. Command line files will be\n"
+              << "  processed in addition to any files specified in the config.\n"
               << "\nExtract Options:\n"
               << "  -d, --dir=DIR     Output directory for extracted files\n"
               << "\nExamples:\n"
@@ -2050,11 +2053,12 @@ void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
 }
 
 void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
+    std::string blockCount = EbcdicUtil::ebcdicToUtf8String(label.blockCount, 6, true);
+    m_currentFile.blockCount = std::stoi(blockCount);
+
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF1 Label found" << std::endl;
         std::cout << "  Dataset Name: " << EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true) << std::endl;
-        std::string blockCount = EbcdicUtil::ebcdicToUtf8String(label.blockCount, 6, true);
-        m_currentFile.blockCount = std::stoi(blockCount);
         std::cout << "  Block Count: " << m_currentFile.blockCount << std::endl;
     }
 }
@@ -3116,6 +3120,15 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
     if (argc < 2) {
         showUsage(argv[0]);
         exit(1);
+    }
+
+    // Check for --help before command parsing
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            showUsage(argv[0]);
+            exit(0);
+        }
     }
 
     // First argument after program name should be the command
