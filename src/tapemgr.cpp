@@ -1602,7 +1602,7 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs,
     std::stringstream jcl;
 
     // Job card
-    jcl << "//REST    JOB (001),'STEPHEN DENNIS',CLASS=A,MSGLEVEL=(1,1),MSGCLASS=A\n";
+    jcl << "//REST    JOB (001),'TAPE RESTORE',CLASS=A,MSGLEVEL=(1,1),MSGCLASS=A\n";
     jcl << "//JOBLIB  DD  DSN=SYS1.LINKLIB,DISP=SHR\n";
 
     int stepNumber = 1;
