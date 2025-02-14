@@ -2171,7 +2171,7 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs,
         jcl << "//SYSUT2   DD  DSN=" << config.datasetName << ",UNIT=" << unit << ",\n";
         jcl << "//             VOL=SER=" << volser << ",DISP=(NEW,CATLG),\n";
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
-            << ",DSORG=PS,BLKSIZE=" << calculateOptimalBlksize(config.lrecl) << "),\n";
+            << ",DSORG=PS,BLKSIZE=" << calculateOptimalBlksize(config.lrecl, unit) << "),\n";
         jcl << "//             SPACE=(" << calculateSpace(config) << ")\n";
     }
 
