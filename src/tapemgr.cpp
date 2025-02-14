@@ -191,6 +191,26 @@ using EOV1Label = HDR1Label;
 using EOF2Label = HDR2Label;
 using EOV2Label = HDR2Label;
 
+struct DasdInfo {
+    std::string deviceType;
+    int halfTrackSize;
+};
+
+const std::map<std::string, DasdInfo> DASD_TYPES = {
+    {"3350", {
+        "3350",
+        19069
+    }},
+    {"3380", {
+        "3380",
+        23476
+    }},
+    {"3390", {
+        "3390",
+        27998
+    }}
+};
+
 void printDetail(const AwsTapeBlockHeader& header, VerbosityLevel verbosity) {
     if (verbosity >= VerbosityLevel::Detailed) {
         std::cout << "Block Header:" << std::endl;
@@ -2080,11 +2100,17 @@ void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
     }
 }
 
-int calculateOptimalBlksize(int lrecl)
-{
-    int halfTrack = 23476; // 3380 half-track.
-    int recordsPerHalfTrack = halfTrack/lrecl;
-    return lrecl*recordsPerHalfTrack;
+int calculateOptimalBlksize(int lrecl, const std::string& deviceType = "3380") {
+    auto it = DASD_TYPES.find(deviceType);
+    if (it == DASD_TYPES.end()) {
+        // Fall back to 3380 if unknown
+        return lrecl * (23476/lrecl);
+    }
+
+    const DasdInfo& info = it->second;
+
+    // Default half-track calculation
+    return lrecl * (info.halfTrackSize/lrecl);
 }
 
 std::string calculateSpace(const FileConfig& config) {
