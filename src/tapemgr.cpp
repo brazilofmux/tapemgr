@@ -108,6 +108,8 @@ struct FileConfig {
     char blockAttribute;    // B, S, R, or ' '
     bool binary;
     size_t recordCount;
+    std::string targetUnit = "3380";    // Default device type
+    std::string targetVolser = "";      // Empty means use default
 };
 
 struct AwsTapeBlockHeader {
@@ -2110,7 +2112,9 @@ std::string calculateSpace(const FileConfig& config) {
     }
 }
 
-std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) {
+std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs,
+                                      const std::string& defaultVolser = "SVD002",
+                                      const std::string& defaultUnit = "3380") {
     std::stringstream jcl;
 
     // Job card
@@ -2119,11 +2123,15 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
 
     int stepNumber = 1;
     for (const auto& config : configs) {
+        // Use dataset-specific values or defaults
+        std::string volser = config.targetVolser.empty() ? defaultVolser : config.targetVolser;
+        std::string unit = config.targetUnit.empty() ? defaultUnit : config.targetUnit;
+
         // Delete step
         jcl << "//STEP" << std::setfill('0') << std::setw(2) << stepNumber++ << "   EXEC PGM=IEFBR14\n";
         jcl << "//SYSPRINT DD  SYSOUT=*\n";
         jcl << "//DSN2DEL  DD  DSN=" << config.datasetName << ",DISP=(MOD,DELETE,DELETE),\n";
-        jcl << "//             UNIT=3380,VOL=SER=SVD002\n";
+        jcl << "//             UNIT=" << unit << ",VOL=SER=" << volser << "\n";
 
         // Restore step
         jcl << "//STEP" << std::setfill('0') << std::setw(2) << stepNumber++ << "   EXEC PGM=IEBGENER\n";
@@ -2134,8 +2142,8 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs) 
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
             << ",BLKSIZE=" << config.blksize << "),\n";
         jcl << "//             DISP=OLD\n";
-        jcl << "//SYSUT2   DD  DSN=" << config.datasetName << ",UNIT=3380,\n";
-        jcl << "//             VOL=SER=SVD002,DISP=(NEW,CATLG),\n";
+        jcl << "//SYSUT2   DD  DSN=" << config.datasetName << ",UNIT=" << unit << ",\n";
+        jcl << "//             VOL=SER=" << volser << ",DISP=(NEW,CATLG),\n";
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
             << ",DSORG=PS,BLKSIZE=" << calculateOptimalBlksize(config.lrecl) << "),\n";
         jcl << "//             SPACE=(" << calculateSpace(config) << ")\n";
