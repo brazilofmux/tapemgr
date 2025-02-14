@@ -19,6 +19,8 @@
 #include <nlohmann/json.hpp>
 #include "ebcdic_util.h"
 
+const char* VERSION = "1.00";
+
 using json = nlohmann::json;
 
 enum class VerbosityLevel {
@@ -60,7 +62,8 @@ const struct option COMMON_OPTIONS[] = {
 };
 
 void showUsage(const char* progName) {
-    std::cout << "Usage: " << progName << " <command> [options] <files...>\n"
+    std::cout << "tapemgr version " << VERSION << "\n"
+              << "\nUsage: " << progName << " <command> [options] <files...>\n"
               << "\nCommands:\n"
               << "  create    Create an AWS tape file from input files\n"
               << "  extract   Extract files from an AWS tape using JSON config\n"
@@ -69,6 +72,7 @@ void showUsage(const char* progName) {
               << "\nCommon Options:\n"
               << "  -v, --verbose     Increase verbosity (can be used multiple times)\n"
               << "  -h, --help        Show command-specific help\n"
+              << "  -V, --version     Show version information\n"
               << "  -c, --config=FILE Configuration file (required for create/extract)\n"
               << "\nCreate Options:\n"
               << "  --volser=VOL      Volume serial number (required)\n"
@@ -2614,11 +2618,15 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
         exit(1);
     }
 
-    // Check for --help before command parsing
+    // Check for --help or --version before command parsing
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
             showUsage(argv[0]);
+            exit(0);
+        }
+        if (arg == "--version" || arg == "-V") {
+            std::cout << "tapemgr version " << VERSION << std::endl;
             exit(0);
         }
     }
@@ -2638,15 +2646,16 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
     static struct option long_options[] = {
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'V'},
         {"config", required_argument, 0, 'c'},
-        {"volser", required_argument, 0, 'V'},
+        {"volser", required_argument, 0, 's'},
         {"owner", required_argument, 0, 'w'},
         {"output", required_argument, 0, 'o'},
         {"dir", required_argument, 0, 'd'},
         {0, 0, 0, 0}
     };
 
-    std::string optstring = "vhc:o:d:";
+    std::string optstring = "vhVc:o:d:";
     int opt;
     int option_index = 0;
 
@@ -2660,10 +2669,13 @@ void parseCommandLine(int argc, char* argv[], ProgramOptions& options) {
             case 'h':
                 showUsage(argv[0]);
                 exit(0);
+            case 'V':
+                std::cout << "tapemgr version " << VERSION << std::endl;
+                exit(0);
             case 'c':
                 options.configFile = optarg;
                 break;
-            case 'V':
+            case 's':
                 options.volser = optarg;
                 break;
             case 'w':
