@@ -17,7 +17,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#include "ebcdic_util.h"
+#include "ebcdic_converter.h"
 
 const char* VERSION = "1.00";
 
@@ -102,6 +102,7 @@ struct FileConfig {
     size_t recordCount;
     std::string targetUnit = "3380";    // Default device type
     std::string targetVolser = "";      // Empty means use default
+    EbcdicCodePage codepage = EbcdicCodePage::CP037; // Default to CP037
 };
 
 struct AwsTapeBlockHeader {
@@ -499,18 +500,24 @@ protected:
     RecordTransformer() = default;
 };
 
-// Text record transformer (EBCDIC to UTF-8 with trimming)
 class TextRecordTransformer : public RecordTransformer {
 public:
+    TextRecordTransformer(EbcdicCodePage codepage) {
+        converter = IEbcdicConverter::create(codepage);
+    }
+
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
         // Convert EBCDIC to Unicode and trim trailing spaces
-        std::string unicode = EbcdicUtil::ebcdicToUtf8String(record.data(), record.size(), true);
+        std::string unicode = converter->ebcdicToUtf8String(record.data(), record.size(), true);
 
         // Convert to vector<uint8_t> and add newline
         std::vector<uint8_t> result(unicode.begin(), unicode.end());
         result.push_back('\n');
         return result;
     }
+
+private:
+    std::shared_ptr<IEbcdicConverter> converter;
 };
 
 // Binary record transformer (pass-through with optional RDW handling)
@@ -527,7 +534,6 @@ private:
     bool m_stripDescriptors;
 };
 
-// Factory for creating appropriate transformers
 class RecordTransformerFactory {
 public:
     static std::unique_ptr<RecordTransformer> create(const json& fileConfig) {
@@ -538,7 +544,15 @@ public:
             bool stripDescriptors = fileConfig["record_format"].get<std::string>()[0] == 'V';
             return std::make_unique<BinaryRecordTransformer>(stripDescriptors);
         } else {
-            return std::make_unique<TextRecordTransformer>();
+            // Get codepage from config or default to CP037
+            EbcdicCodePage codepage = EbcdicCodePage::CP037;
+            if (fileConfig.contains("codepage")) {
+                std::string cp = fileConfig["codepage"].get<std::string>();
+                if (cp == "CP273") codepage = EbcdicCodePage::CP273;
+                else if (cp == "CP277") codepage = EbcdicCodePage::CP277;
+                else if (cp == "CP285") codepage = EbcdicCodePage::CP285;
+            }
+            return std::make_unique<TextRecordTransformer>(codepage);
         }
     }
 };
@@ -947,6 +961,11 @@ private:
     // Current file being processed
     TapeFileInfo m_currentFile;
 
+    std::shared_ptr<IEbcdicConverter> labelConverter;
+    std::shared_ptr<IEbcdicConverter> getConverter(EbcdicCodePage codepage) {
+        return IEbcdicConverter::create(codepage);
+    }
+
     std::string m_ownerCode;
 };
 
@@ -964,6 +983,7 @@ AwsTapeDumper::AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbos
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "Processing AWSTAPE file: " << inputFile << std::endl;
     }
+    labelConverter = getConverter(EbcdicCodePage::CP037); // Always use CP037 for labels
 }
 
 AwsTapeDumper::~AwsTapeDumper() {
@@ -1014,7 +1034,7 @@ bool AwsTapeDumper::scanTape() {
         }
 
         if (header.curblkl > 0) {
-            std::string labelIdentifier = EbcdicUtil::ebcdicToUtf8String(buffer.data(), 4, true);
+            std::string labelIdentifier = labelConverter->ebcdicToUtf8String(buffer.data(), 4, true);
 
             if (labelIdentifier == "VOL1") {
                 const VOL1Label* vol1 = reinterpret_cast<const VOL1Label*>(buffer.data());
@@ -1332,6 +1352,12 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
         const std::set<std::string> validRecFM = {"F", "FB", "V", "VB", "VS", "VBS", "U"};
         const std::set<std::string> validBlockAttrs = {"B", "S", "R", " "};
         const std::set<std::string> validDatasetOrgs = {"PS"};  // Could expand later
+        const std::map<std::string, EbcdicCodePage> validCodePages = {
+            {"CP037", EbcdicCodePage::CP037},
+            {"CP273", EbcdicCodePage::CP273},
+            {"CP277", EbcdicCodePage::CP277},
+            {"CP285", EbcdicCodePage::CP285}
+        };
 
         // Validate files array
         if (!config["files"].is_array()) {
@@ -1448,6 +1474,19 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                 error = "binary must be a boolean value";
                 return false;
             }
+
+            // Validate codepage if present
+            if (file.contains("codepage")) {
+                if (!file["codepage"].is_string()) {
+                    error = "codepage must be a string value";
+                    return false;
+                }
+                std::string cp = file["codepage"].get<std::string>();
+                if (validCodePages.find(cp) == validCodePages.end()) {
+                    error = "Invalid codepage. Must be one of: CP037, CP273, CP277, CP285";
+                    return false;
+                }
+            }
         }
 
         return true;
@@ -1486,8 +1525,8 @@ json AwsTapeDumper::loadConfig(const std::string& filename, std::string& error) 
 }
 
 void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
-    m_currentVolser = EbcdicUtil::ebcdicToUtf8String(label.volumeSerial, 6, true);
-    m_ownerCode = EbcdicUtil::ebcdicToUtf8String(label.ownerCode, 10, true);
+    m_currentVolser = labelConverter->ebcdicToUtf8String(label.volumeSerial, 6, true);
+    m_ownerCode = labelConverter->ebcdicToUtf8String(label.ownerCode, 10, true);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
 	std::cout << "VOL1 Label found" << std::endl;
@@ -1497,10 +1536,10 @@ void AwsTapeDumper::processVOL1Label(const VOL1Label& label) {
 }
 
 void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
-    m_currentFile.datasetName = EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true);
-    m_currentFile.volumeSerial = EbcdicUtil::ebcdicToUtf8String(label.dataSetSerialNumber, 6, true);
-    m_currentFile.creationDate = EbcdicUtil::ebcdicToUtf8String(label.creationDate, 6);
-    m_currentFile.expirationDate = EbcdicUtil::ebcdicToUtf8String(label.expirationDate, 6);
+    m_currentFile.datasetName = labelConverter->ebcdicToUtf8String(label.dataSetIdentifier, 17, true);
+    m_currentFile.volumeSerial = labelConverter->ebcdicToUtf8String(label.dataSetSerialNumber, 6, true);
+    m_currentFile.creationDate = labelConverter->ebcdicToUtf8String(label.creationDate, 6);
+    m_currentFile.expirationDate = labelConverter->ebcdicToUtf8String(label.expirationDate, 6);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "HDR1 Label found" << std::endl;
@@ -1508,17 +1547,17 @@ void AwsTapeDumper::processHDR1Label(const HDR1Label& label) {
         std::cout << "  Dataset Serial Number: " << m_currentFile.volumeSerial << std::endl;
         std::cout << "  Creation Date: " << m_currentFile.creationDate << std::endl;
         std::cout << "  Expiration Date: " << m_currentFile.expirationDate << std::endl;
-        std::cout << "  Dataset Security: " << EbcdicUtil::ebcdicToUtf8String(&label.dataSetSecurity, 1) << std::endl;
+        std::cout << "  Dataset Security: " << labelConverter->ebcdicToUtf8String(&label.dataSetSecurity, 1) << std::endl;
     }
 }
 
 void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
-    m_currentFile.recordFormat = EbcdicUtil::ebcdicToAscii(label.recordFormat);
-    m_currentFile.blockAttribute = EbcdicUtil::ebcdicToAscii(label.blockAttribute);
+    m_currentFile.recordFormat = labelConverter->ebcdicToAscii(label.recordFormat);
+    m_currentFile.blockAttribute = labelConverter->ebcdicToAscii(label.blockAttribute);
 
     // Convert EBCDIC numeric strings to integers
-    std::string blksize = EbcdicUtil::ebcdicToUtf8String(label.blockLength, 5, true);
-    std::string lrecl = EbcdicUtil::ebcdicToUtf8String(label.recordLength, 5, true);
+    std::string blksize = labelConverter->ebcdicToUtf8String(label.blockLength, 5, true);
+    std::string lrecl = labelConverter->ebcdicToUtf8String(label.recordLength, 5, true);
     m_currentFile.blockSize = std::stoi(blksize);
     m_currentFile.recordLength = std::stoi(lrecl);
 
@@ -1528,21 +1567,21 @@ void AwsTapeDumper::processHDR2Label(const HDR2Label& label) {
         std::cout << "  Block Attribute: " << m_currentFile.blockAttribute << std::endl;
         std::cout << "  Block Length: " << m_currentFile.blockSize << std::endl;
         std::cout << "  Record Length: " << m_currentFile.recordLength << std::endl;
-        std::cout << "  Tape Density: " << EbcdicUtil::ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
-        std::cout << "  Job/Step: " << EbcdicUtil::ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
-        std::cout << "  Tape Recording Technique: " << EbcdicUtil::ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
-        std::cout << "  Control Character: " << EbcdicUtil::ebcdicToUtf8String(&label.controlCharacter, 1) << std::endl;
-        std::cout << "  Device Serial Number: " << EbcdicUtil::ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
+        std::cout << "  Tape Density: " << labelConverter->ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
+        std::cout << "  Job/Step: " << labelConverter->ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
+        std::cout << "  Tape Recording Technique: " << labelConverter->ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
+        std::cout << "  Control Character: " << labelConverter->ebcdicToUtf8String(&label.controlCharacter, 1) << std::endl;
+        std::cout << "  Device Serial Number: " << labelConverter->ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
     }
 }
 
 void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
-    std::string blockCount = EbcdicUtil::ebcdicToUtf8String(label.blockCount, 6, true);
+    std::string blockCount = labelConverter->ebcdicToUtf8String(label.blockCount, 6, true);
     m_currentFile.blockCount = std::stoi(blockCount);
 
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF1 Label found" << std::endl;
-        std::cout << "  Dataset Name: " << EbcdicUtil::ebcdicToUtf8String(label.dataSetIdentifier, 17, true) << std::endl;
+        std::cout << "  Dataset Name: " << labelConverter->ebcdicToUtf8String(label.dataSetIdentifier, 17, true) << std::endl;
         std::cout << "  Block Count: " << m_currentFile.blockCount << std::endl;
     }
 }
@@ -1550,15 +1589,15 @@ void AwsTapeDumper::processEOF1Label(const EOF1Label& label) {
 void AwsTapeDumper::processEOF2Label(const EOF2Label& label) {
     if (m_verbosity >= VerbosityLevel::Detailed) {
         std::cout << "EOF2 Label found" << std::endl;
-        std::cout << "  Record Format: " << EbcdicUtil::ebcdicToUtf8String(&label.recordFormat, 1) << std::endl;
-        std::cout << "  Block Attribute: " << EbcdicUtil::ebcdicToUtf8String(&label.blockAttribute, 1) << std::endl;
-        std::cout << "  Block Length: " << EbcdicUtil::ebcdicToUtf8String(label.blockLength, 5, true) << std::endl;
-        std::cout << "  Record Length: " << EbcdicUtil::ebcdicToUtf8String(label.recordLength, 5, true) << std::endl;
-        std::cout << "  Tape Density: " << EbcdicUtil::ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
-        std::cout << "  Job/Step: " << EbcdicUtil::ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
-        std::cout << "  Tape Recording Technique: " << EbcdicUtil::ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
-        std::cout << "  Control Character: " << EbcdicUtil::ebcdicToUtf8String(&label.controlCharacter, 1)<< std::endl;
-        std::cout << "  Device Serial Number: " << EbcdicUtil::ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
+        std::cout << "  Record Format: " << labelConverter->ebcdicToUtf8String(&label.recordFormat, 1) << std::endl;
+        std::cout << "  Block Attribute: " << labelConverter->ebcdicToUtf8String(&label.blockAttribute, 1) << std::endl;
+        std::cout << "  Block Length: " << labelConverter->ebcdicToUtf8String(label.blockLength, 5, true) << std::endl;
+        std::cout << "  Record Length: " << labelConverter->ebcdicToUtf8String(label.recordLength, 5, true) << std::endl;
+        std::cout << "  Tape Density: " << labelConverter->ebcdicToUtf8String(&label.tapeDensity, 1) << std::endl;
+        std::cout << "  Job/Step: " << labelConverter->ebcdicToUtf8String(label.jobStepIdentification, 17, true) << std::endl;
+        std::cout << "  Tape Recording Technique: " << labelConverter->ebcdicToUtf8String(label.tapeRecordingTechnique, 2, true) << std::endl;
+        std::cout << "  Control Character: " << labelConverter->ebcdicToUtf8String(&label.controlCharacter, 1)<< std::endl;
+        std::cout << "  Device Serial Number: " << labelConverter->ebcdicToUtf8String(label.deviceSerialNumber, 6, true) << std::endl;
     }
 }
 
@@ -1746,10 +1785,13 @@ public:
 
 protected:
     RecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : m_config(config), m_verbosity(verbosity) {}
+        : m_config(config), m_verbosity(verbosity) {
+        converter = IEbcdicConverter::create(config.codepage);
+    }
 
     const FileConfig& m_config;
     VerbosityLevel m_verbosity;
+    std::shared_ptr<IEbcdicConverter> converter;
 };
 
 class FixedRecordFormatter : public RecordFormatter {
@@ -1768,7 +1810,7 @@ public:
             return rawData;
         } else {
             // Text data - convert to EBCDIC and pad
-            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            auto ebcdicData = converter->utf8ToEbcdic(rawData);
             std::copy(ebcdicData.begin(),
                      ebcdicData.begin() + std::min(ebcdicData.size(), formattedRecord.size()),
                      formattedRecord.begin());
@@ -1801,7 +1843,7 @@ public:
             return rawData;
         } else {
             // Text data - create RDW and convert to EBCDIC
-            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            auto ebcdicData = converter->utf8ToEbcdic(rawData);
             uint16_t recordLength = ebcdicData.size() + 4;  // Add RDW size
 
             if (recordLength > m_config.lrecl) {
@@ -1853,7 +1895,7 @@ public:
             return rawData;
         } else {
             // Text data - create spanned record structure
-            auto ebcdicData = EbcdicUtil::utf8ToEbcdic(rawData);
+            auto ebcdicData = converter->utf8ToEbcdic(rawData);
             uint16_t recordLength = ebcdicData.size() + 4;  // Add SDW size
 
             std::vector<uint8_t> formattedRecord(recordLength);
@@ -2217,6 +2259,7 @@ public:
         if (!m_outFile) {
             throw std::runtime_error("Unable to open output file: " + outputFile);
         }
+        labelConverter = getConverter(EbcdicCodePage::CP037); // Always use CP037 for labels
     }
 
     void addFile(const json& fileConfig) {
@@ -2255,6 +2298,15 @@ public:
         }
         if (fileConfig.contains("expiration_date")) {
             m_expirationDate = fileConfig["expiration_date"].get<std::string>();
+        }
+
+        // Parse codepage
+        if (fileConfig.contains("codepage")) {
+            std::string cp = fileConfig["codepage"].get<std::string>();
+            if (cp == "CP273") config.codepage = EbcdicCodePage::CP273;
+            else if (cp == "CP277") config.codepage = EbcdicCodePage::CP277;
+            else if (cp == "CP285") config.codepage = EbcdicCodePage::CP285;
+            else config.codepage = EbcdicCodePage::CP037; // Default
         }
 
         addFile(config);  // Call the FileConfig version
@@ -2408,7 +2460,7 @@ private:
     void writeVolumeLabel() {
         std::cout << "Writing VOL1 label" << std::endl;
         std::string label = createVOL1Label();
-        writeBlock(EbcdicUtil::utf8ToEbcdic(label), 0xA0, true);
+        writeBlock(labelConverter->utf8ToEbcdic(label), 0xA0, true);
     }
 
     void writeFile(FileConfig& config, int fileNumber) {
@@ -2425,8 +2477,8 @@ private:
         std::string hdr1 = createHDR1Label(config, fileNumber);
         std::string hdr2 = createHDR2Label(config);
 
-        writeBlock(EbcdicUtil::utf8ToEbcdic(hdr1), 0xA0, true);
-        writeBlock(EbcdicUtil::utf8ToEbcdic(hdr2), 0xA0, true);
+        writeBlock(labelConverter->utf8ToEbcdic(hdr1), 0xA0, true);
+        writeBlock(labelConverter->utf8ToEbcdic(hdr2), 0xA0, true);
         writeTapeMark();
     }
 
@@ -2466,14 +2518,19 @@ private:
         writeTapeMark();
         std::string eof1 = createEOF1Label(config, fileNumber);
         std::string eof2 = createEOF2Label(config);
-        writeBlock(EbcdicUtil::utf8ToEbcdic(eof1), 0xA0, true);
-        writeBlock(EbcdicUtil::utf8ToEbcdic(eof2), 0xA0, true);
+        writeBlock(labelConverter->utf8ToEbcdic(eof1), 0xA0, true);
+        writeBlock(labelConverter->utf8ToEbcdic(eof2), 0xA0, true);
         writeTapeMark();
     }
 
     void writeEndOfTape() {
         std::cout << "Writing end of tape markers" << std::endl;
         writeTapeMark();
+    }
+
+    std::shared_ptr<IEbcdicConverter> labelConverter;
+    std::shared_ptr<IEbcdicConverter> getConverter(EbcdicCodePage codepage) {
+        return IEbcdicConverter::create(codepage);
     }
 
     void writeBlock(const std::vector<uint8_t>& data, uint8_t flags, bool isLabel = false) {
