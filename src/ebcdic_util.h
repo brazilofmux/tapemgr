@@ -14,8 +14,8 @@
 #define UTF8_ILLEGAL   6
 
 // Transition table state definitions
-#define TR_CP031_START_STATE (0)
-#define TR_CP031_ACCEPTING_STATES_START (3)
+#define TR_CP037_START_STATE (0)
+#define TR_CP037_ACCEPTING_STATES_START (3)
 
 // EBCDIC substitute character
 #define EBCDIC_SUB (63)
@@ -72,11 +72,11 @@ public:
 private:
     // Conversion tables
     static const unsigned char utf8_FirstByte[256];
-    static const unsigned char tr_cp031_itt[256];
-    static const unsigned short tr_cp031_sot[3];
-    static const unsigned short tr_cp031_sbt[271];
-    static const uint8_t ebcdicToUtf8Lengths[256];
-    static const uint8_t ebcdicToUtf8Bytes[256][2];
+    static const unsigned char tr_cp037_itt[256];
+    static const unsigned short tr_cp037_sot[3];
+    static const unsigned short tr_cp037_sbt[274];
+    static const uint8_t cp037_to_utf8_lengths[256];
+    static const uint8_t cp037_to_utf8_bytes[256][4];
 };
 
 #endif // EBCDIC_UTIL_H

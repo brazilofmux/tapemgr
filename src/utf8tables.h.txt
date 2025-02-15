@@ -1,0 +1,44 @@
+// utf/tr_utf8_cp037.txt
+//
+// 256 code points.
+// 3 states, 194 columns, 810 bytes
+//
+#define TR_CP037_START_STATE (0)
+#define TR_CP037_ACCEPTING_STATES_START (3)
+extern const unsigned char tr_cp037_itt[256];
+extern const unsigned short tr_cp037_sot[3];
+extern const unsigned short tr_cp037_sbt[274];
+
+// utf/tr_utf8_cp273.txt
+//
+// 256 code points.
+// 3 states, 194 columns, 810 bytes
+//
+#define TR_CP273_START_STATE (0)
+#define TR_CP273_ACCEPTING_STATES_START (3)
+extern const unsigned char tr_cp273_itt[256];
+extern const unsigned short tr_cp273_sot[3];
+extern const unsigned short tr_cp273_sbt[274];
+
+// utf/tr_utf8_cp285.txt
+//
+// 256 code points.
+// 5 states, 195 columns, 846 bytes
+//
+#define TR_CP285_START_STATE (0)
+#define TR_CP285_ACCEPTING_STATES_START (5)
+extern const unsigned char tr_cp285_itt[256];
+extern const unsigned short tr_cp285_sot[5];
+extern const unsigned short tr_cp285_sbt[290];
+
+// utf/tr_utf8_ibm277.txt
+//
+// 256 code points.
+// 3 states, 194 columns, 810 bytes
+//
+#define TR_IBM277_START_STATE (0)
+#define TR_IBM277_ACCEPTING_STATES_START (3)
+extern const unsigned char tr_ibm277_itt[256];
+extern const unsigned short tr_ibm277_sot[3];
+extern const unsigned short tr_ibm277_sbt[274];
+
