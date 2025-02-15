@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "cp277_tables.h"
 
 // utf/tr_utf8_cp277.txt

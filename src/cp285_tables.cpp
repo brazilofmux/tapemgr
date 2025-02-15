@@ -1,3 +1,4 @@
+#include <cstdint>
 #include "cp285_tables.h"
 
 // utf/tr_utf8_cp285.txt

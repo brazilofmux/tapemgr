@@ -64,7 +64,7 @@ private:
     const unsigned short* tr_sot_;
     const unsigned short* tr_sbt_;
     const uint8_t* toUtf8Lengths_;
-    const uint8_t (*toUtf8Bytes_)[2];
+    const uint8_t (*toUtf8Bytes_)[4];
 };
 
 // Implementation for streaming conversion of large files
@@ -88,7 +88,7 @@ private:
     const unsigned short* tr_sot_;
     const unsigned short* tr_sbt_;
     const uint8_t* toUtf8Lengths_;
-    const uint8_t (*toUtf8Bytes_)[2];
+    const uint8_t (*toUtf8Bytes_)[4];
     
     // Streaming helper methods
     void processBuffer(const unsigned char* input, size_t length, 
@@ -122,7 +122,7 @@ public:
         const unsigned short* tr_sot;
         const unsigned short* tr_sbt;
         const uint8_t* toUtf8Lengths;
-        const uint8_t (*toUtf8Bytes)[2];
+        const uint8_t (*toUtf8Bytes)[4];
     };
     
     const ConversionTables& getTables(EbcdicCodePage codepage);

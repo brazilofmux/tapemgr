@@ -1,3 +1,5 @@
+#include <stdexcept>
+#include <cstring>
 #include "ebcdic_converter.h"
 #include "cp037_tables.h"
 #include "cp273_tables.h"
@@ -56,44 +58,44 @@ const unsigned char utf8_FirstByte[256] = {
 // Registry initialization
 EbcdicTableRegistry::EbcdicTableRegistry() {
     // Initialize tables for CP037
-    tables_[EbcdicCodePage::CP037] = {
-        utf8_FirstByte,      // From original EbcdicUtil
-        tr_cp037_itt,        // Forward conversion tables
-        tr_cp037_sot,
-        tr_cp037_sbt,
-        cp037_to_utf8_lengths,
-        cp037_to_utf8_bytes
-    };
+    ConversionTables cp037tables;
+    cp037tables.utf8_FirstByte = utf8_FirstByte;
+    cp037tables.tr_itt = tr_cp037_itt;
+    cp037tables.tr_sot = tr_cp037_sot;
+    cp037tables.tr_sbt = tr_cp037_sbt;
+    cp037tables.toUtf8Lengths = cp037_to_utf8_lengths;
+    cp037tables.toUtf8Bytes = cp037_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP037] = cp037tables;
 
     // Initialize tables for CP273
-    tables_[EbcdicCodePage::CP273] = {
-        utf8_FirstByte,      // Same first byte table for all
-        tr_cp273_itt,
-        tr_cp273_sot,
-        tr_cp273_sbt,
-        cp273_to_utf8_lengths,
-        cp273_to_utf8_bytes
-    };
+    ConversionTables cp273tables;
+    cp273tables.utf8_FirstByte = utf8_FirstByte;
+    cp273tables.tr_itt = tr_cp273_itt;
+    cp273tables.tr_sot = tr_cp273_sot;
+    cp273tables.tr_sbt = tr_cp273_sbt;
+    cp273tables.toUtf8Lengths = cp273_to_utf8_lengths;
+    cp273tables.toUtf8Bytes = cp273_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP273] = cp273tables;
 
     // Initialize tables for CP277
-    tables_[EbcdicCodePage::CP277] = {
-        utf8_FirstByte,
-        tr_cp277_itt,
-        tr_cp277_sot,
-        tr_cp277_sbt,
-        cp277_to_utf8_lengths,
-        cp277_to_utf8_bytes
-    };
+    ConversionTables cp277tables;
+    cp277tables.utf8_FirstByte = utf8_FirstByte;
+    cp277tables.tr_itt = tr_cp277_itt;
+    cp277tables.tr_sot = tr_cp277_sot;
+    cp277tables.tr_sbt = tr_cp277_sbt;
+    cp277tables.toUtf8Lengths = cp277_to_utf8_lengths;
+    cp277tables.toUtf8Bytes = cp277_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP277] = cp277tables;
 
     // Initialize tables for CP285
-    tables_[EbcdicCodePage::CP285] = {
-        utf8_FirstByte,
-        tr_cp285_itt,
-        tr_cp285_sot,
-        tr_cp285_sbt,
-        cp285_to_utf8_lengths,
-        cp285_to_utf8_bytes
-    };
+    ConversionTables cp285tables;
+    cp285tables.utf8_FirstByte = utf8_FirstByte;
+    cp285tables.tr_itt = tr_cp285_itt;
+    cp285tables.tr_sot = tr_cp285_sot;
+    cp285tables.tr_sbt = tr_cp285_sbt;
+    cp285tables.toUtf8Lengths = cp285_to_utf8_lengths;
+    cp285tables.toUtf8Bytes = cp285_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP285] = cp285tables;
 }
 
 const EbcdicTableRegistry::ConversionTables& 
