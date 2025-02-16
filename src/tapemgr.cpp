@@ -515,30 +515,14 @@ protected:
 
 class TextRecordTransformer : public RecordTransformer {
 public:
-    TextRecordTransformer(RecordMode mode, EbcdicCodePage codepage)
-        : m_mode(mode) {
+    TextRecordTransformer(EbcdicCodePage codepage) {
         converter = IEbcdicConverter::create(codepage);
     }
 
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
-        static const size_t RDW_SIZE = 4;
-
-        // Handle variable length records
-        size_t dataOffset = 0;
-        size_t dataLength = record.size();
-
-        if (m_mode == RecordMode::Variable) {
-            if (record.size() < RDW_SIZE) {
-                throw std::runtime_error("Record too short for variable format");
-            }
-            dataOffset = RDW_SIZE;
-            dataLength -= RDW_SIZE;
-        }
-
-        // Convert EBCDIC to Unicode and trim trailing spaces
         std::string unicode = converter->ebcdicToUtf8String(
-            record.data() + dataOffset,
-            dataLength,
+            record.data(),
+            record.size(),
             true
         );
 
@@ -550,7 +534,6 @@ public:
 
 private:
     std::shared_ptr<IEbcdicConverter> converter;
-    RecordMode m_mode;
 };
 
 // Binary record transformer (pass-through with optional RDW handling)
@@ -587,7 +570,7 @@ public:
             else if (cp == "CP285") codepage = EbcdicCodePage::CP285;
         }
 
-        return std::make_unique<TextRecordTransformer>(mode, codepage);
+        return std::make_unique<TextRecordTransformer>(codepage);
     }
 };
 
@@ -2096,38 +2079,14 @@ public:
         std::vector<std::vector<uint8_t>> completeBlocks;
         bool isBlocked = m_config.recfm.find('B') != std::string::npos;
 
-        if (m_config.binary) {
-            // For binary VB, data already includes RDW
-            // Just need to handle blocking
-            if (!isBlocked || !m_blockBuilder.hasRoom(data.size())) {
-                std::vector<uint8_t> block = m_blockBuilder.finish();
-                if (!block.empty()) {
-                    completeBlocks.push_back(block);
-                }
+        // Data already has RDW from VariableRecordProcessor for both binary and text
+        if (!isBlocked || !m_blockBuilder.hasRoom(data.size())) {
+            std::vector<uint8_t> block = m_blockBuilder.finish();
+            if (!block.empty()) {
+                completeBlocks.push_back(block);
             }
-            m_blockBuilder.addData(data);
-        } else {
-            // For text VB, need to add RDW
-            uint16_t recordLength = data.size() + 4;  // Include RDW size
-            std::vector<uint8_t> record(recordLength);
-
-            // Create RDW
-            record[0] = recordLength >> 8;     // Length high byte
-            record[1] = recordLength;          // Length low byte
-            record[2] = 0;                     // Flags
-            record[3] = 0;                     // Reserved
-
-            // Add the actual data
-            std::copy(data.begin(), data.end(), record.begin() + 4);
-
-            if (!isBlocked || !m_blockBuilder.hasRoom(recordLength)) {
-                std::vector<uint8_t> block = m_blockBuilder.finish();
-                if (!block.empty()) {
-                    completeBlocks.push_back(block);
-                }
-            }
-            m_blockBuilder.addData(record);
         }
+        m_blockBuilder.addData(data);
 
         m_recordCount++;
         return completeBlocks;
