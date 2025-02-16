@@ -334,7 +334,6 @@ private:
     uint16_t m_recordLength;
 };
 
-// Variable Record Processor
 class VariableRecordProcessor : public RecordProcessor {
 public:
     VariableRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
@@ -351,10 +350,19 @@ public:
                 throw std::runtime_error("Incomplete RDW at end of block");
             }
 
-            // Extract record length from RDW
+            // Extract record length from RDW (includes RDW size)
             uint16_t recordLength = (blockData[offset] << 8) | blockData[offset + 1];
             if (recordLength < 4) {
                 throw std::runtime_error("Invalid RDW length");
+            }
+
+            // Validate record length against LRECL (RDW gives total length including itself)
+            if ((recordLength - 4) > m_maxRecordLength) {
+                std::stringstream ss;
+                ss << "Data length (" << (recordLength - 4)
+                   << ") exceeds maximum record length (" << m_maxRecordLength
+                   << ") [RDW length=" << recordLength << "]";
+                throw std::runtime_error(ss.str());
             }
 
             // Validate record fits in block
@@ -507,18 +515,18 @@ protected:
 
 class TextRecordTransformer : public RecordTransformer {
 public:
-    TextRecordTransformer(RecordMode mode, EbcdicCodePage codepage) 
+    TextRecordTransformer(RecordMode mode, EbcdicCodePage codepage)
         : m_mode(mode) {
         converter = IEbcdicConverter::create(codepage);
     }
 
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
         static const size_t RDW_SIZE = 4;
-        
+
         // Handle variable length records
         size_t dataOffset = 0;
         size_t dataLength = record.size();
-        
+
         if (m_mode == RecordMode::Variable) {
             if (record.size() < RDW_SIZE) {
                 throw std::runtime_error("Record too short for variable format");
@@ -1870,11 +1878,11 @@ public:
         } else {
             // Text data - create RDW and convert to EBCDIC
             auto ebcdicData = converter->utf8ToEbcdic(rawData);
-            uint16_t recordLength = ebcdicData.size() + 4;  // Add RDW size
-
+            uint16_t recordLength = ebcdicData.size();
             if (recordLength > m_config.lrecl) {
                 throw std::runtime_error("Text record length would exceed LRECL");
             }
+            recordLength += 4;  // Add RDW size
 
             std::vector<uint8_t> formattedRecord(recordLength);
             // Add RDW
@@ -1980,7 +1988,11 @@ public:
 
     bool addData(const std::vector<uint8_t>& data) {
         if (!hasRoom(data.size())) {
-            return false;
+            std::stringstream ss;
+            ss << "Block overflow: tried to add " << data.size()
+               << " bytes when only " << (m_blockSize - m_currentOffset)
+               << " bytes remain (block size: " << m_blockSize << ")";
+            throw std::runtime_error(ss.str());
         }
 
         std::copy(data.begin(), data.end(),
