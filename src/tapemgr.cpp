@@ -37,6 +37,11 @@ enum class OperationMode {
     Init,       // Create JSON template from tape for later extraction
 };
 
+enum class RecordMode {
+    Fixed,
+    Variable
+};
+
 struct ProgramOptions {
     VerbosityLevel verbosity = VerbosityLevel::Normal;
     OperationMode mode = OperationMode::Scan;
@@ -502,13 +507,32 @@ protected:
 
 class TextRecordTransformer : public RecordTransformer {
 public:
-    TextRecordTransformer(EbcdicCodePage codepage) {
+    TextRecordTransformer(RecordMode mode, EbcdicCodePage codepage) 
+        : m_mode(mode) {
         converter = IEbcdicConverter::create(codepage);
     }
 
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
+        static const size_t RDW_SIZE = 4;
+        
+        // Handle variable length records
+        size_t dataOffset = 0;
+        size_t dataLength = record.size();
+        
+        if (m_mode == RecordMode::Variable) {
+            if (record.size() < RDW_SIZE) {
+                throw std::runtime_error("Record too short for variable format");
+            }
+            dataOffset = RDW_SIZE;
+            dataLength -= RDW_SIZE;
+        }
+
         // Convert EBCDIC to Unicode and trim trailing spaces
-        std::string unicode = converter->ebcdicToUtf8String(record.data(), record.size(), true);
+        std::string unicode = converter->ebcdicToUtf8String(
+            record.data() + dataOffset,
+            dataLength,
+            true
+        );
 
         // Convert to vector<uint8_t> and add newline
         std::vector<uint8_t> result(unicode.begin(), unicode.end());
@@ -518,6 +542,7 @@ public:
 
 private:
     std::shared_ptr<IEbcdicConverter> converter;
+    RecordMode m_mode;
 };
 
 // Binary record transformer (pass-through with optional RDW handling)
@@ -538,22 +563,23 @@ class RecordTransformerFactory {
 public:
     static std::unique_ptr<RecordTransformer> create(const json& fileConfig) {
         bool isBinary = fileConfig.value("binary", false);
+        std::string recordFormat = fileConfig["record_format"].get<std::string>();
+        RecordMode mode = (recordFormat[0] == 'V') ? RecordMode::Variable : RecordMode::Fixed;
 
         if (isBinary) {
-            // For variable formats, we might want to strip RDW/SDW
-            bool stripDescriptors = fileConfig["record_format"].get<std::string>()[0] == 'V';
-            return std::make_unique<BinaryRecordTransformer>(stripDescriptors);
-        } else {
-            // Get codepage from config or default to CP037
-            EbcdicCodePage codepage = EbcdicCodePage::CP037;
-            if (fileConfig.contains("codepage")) {
-                std::string cp = fileConfig["codepage"].get<std::string>();
-                if (cp == "CP273") codepage = EbcdicCodePage::CP273;
-                else if (cp == "CP277") codepage = EbcdicCodePage::CP277;
-                else if (cp == "CP285") codepage = EbcdicCodePage::CP285;
-            }
-            return std::make_unique<TextRecordTransformer>(codepage);
+            return std::make_unique<BinaryRecordTransformer>(mode == RecordMode::Variable);
         }
+
+        // Get codepage from config or default to CP037
+        EbcdicCodePage codepage = EbcdicCodePage::CP037;
+        if (fileConfig.contains("codepage")) {
+            std::string cp = fileConfig["codepage"].get<std::string>();
+            if (cp == "CP273") codepage = EbcdicCodePage::CP273;
+            else if (cp == "CP277") codepage = EbcdicCodePage::CP277;
+            else if (cp == "CP285") codepage = EbcdicCodePage::CP285;
+        }
+
+        return std::make_unique<TextRecordTransformer>(mode, codepage);
     }
 };
 
