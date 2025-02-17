@@ -1700,8 +1700,9 @@ public:
         }
 
         uint16_t recordLength = (rdw[0] << 8) | rdw[1];
-        if (recordLength < 4) {
-            throw std::runtime_error("Invalid RDW length in binary VB file");
+        if (recordLength < 5) {
+            throw std::runtime_error("Binary VB record length must be at least 5 bytes (got " +
+                                   std::to_string(recordLength) + ")");
         }
 
         // Return just the data portion
@@ -1775,11 +1776,21 @@ public:
 
     std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) override {
         if (m_config.binary) {
-            // Binary data - just pass through
             return rawData;
         } else {
-            // Text data - just convert to EBCDIC
-            return converter->utf8ToEbcdic(rawData);
+            // Convert to string for easier handling
+            std::string text(rawData.begin(), rawData.end());
+
+            // Right trim spaces, but ensure at least one space for empty
+            while (!text.empty() && text.back() == ' ') {
+                text.pop_back();
+            }
+            if (text.empty()) {
+                text = " ";  // Single UTF-8 space (will become 0x40 in EBCDIC)
+            }
+
+            // Convert trimmed text to EBCDIC
+            return converter->utf8ToEbcdic(std::vector<uint8_t>(text.begin(), text.end()));
         }
     }
 };
@@ -1993,25 +2004,6 @@ public:
 
     std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) override {
         std::vector<std::vector<uint8_t>> completeBlocks;
-
-        // Special handling for empty records
-        if (data.empty()) {
-            std::vector<uint8_t> segment(4);  // Just SDW
-            segment[0] = 0x00;  // Length high byte (4 total)
-            segment[1] = 0x04;  // Length low byte
-            segment[2] = 0x00;  // Control bits - complete record
-            segment[3] = 0x00;  // Reserved
-
-            if (!m_blockBuilder.hasRoom(segment.size())) {
-                std::vector<uint8_t> block = m_blockBuilder.finish();
-                if (!block.empty()) {
-                    completeBlocks.push_back(block);
-                }
-            }
-            m_blockBuilder.addData(segment);
-            m_recordCount++;
-            return completeBlocks;
-        }
 
         // Normal record processing for non-empty records (unchanged)
         size_t maxDataPerSegment = m_config.blksize - 8;
