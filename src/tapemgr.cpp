@@ -1994,27 +1994,43 @@ public:
     std::vector<std::vector<uint8_t>> processRecord(const std::vector<uint8_t>& data) override {
         std::vector<std::vector<uint8_t>> completeBlocks;
 
-        // Calculate maximum data per segment (block size minus BDW and SDW)
-        size_t maxDataPerSegment = m_config.blksize - 8;  // 4 for BDW, 4 for SDW
+        // Special handling for empty records
+        if (data.empty()) {
+            std::vector<uint8_t> segment(4);  // Just SDW
+            segment[0] = 0x00;  // Length high byte (4 total)
+            segment[1] = 0x04;  // Length low byte
+            segment[2] = 0x00;  // Control bits - complete record
+            segment[3] = 0x00;  // Reserved
+
+            if (!m_blockBuilder.hasRoom(segment.size())) {
+                std::vector<uint8_t> block = m_blockBuilder.finish();
+                if (!block.empty()) {
+                    completeBlocks.push_back(block);
+                }
+            }
+            m_blockBuilder.addData(segment);
+            m_recordCount++;
+            return completeBlocks;
+        }
+
+        // Normal record processing for non-empty records (unchanged)
+        size_t maxDataPerSegment = m_config.blksize - 8;
         size_t remainingData = data.size();
         size_t dataOffset = 0;
         bool isFirstSegment = true;
 
         while (remainingData > 0) {
-            // Calculate this segment's size
             size_t dataInSegment = std::min(remainingData, maxDataPerSegment);
             bool isLastSegment = (dataInSegment == remainingData);
 
-            // Create segment with SDW
             std::vector<uint8_t> segment;
-            segment.reserve(dataInSegment + 4);  // Data plus SDW
+            segment.reserve(dataInSegment + 4);
 
             // Add SDW
-            uint16_t totalLength = dataInSegment + 4;  // Include SDW in length
+            uint16_t totalLength = dataInSegment + 4;
             segment.push_back(totalLength >> 8);
             segment.push_back(totalLength & 0xFF);
 
-            // Set segment control bits
             if (isFirstSegment && isLastSegment) {
                 segment.push_back(0x00);  // Complete record
             } else if (isFirstSegment) {
@@ -2024,22 +2040,18 @@ public:
             } else {
                 segment.push_back(0x03);  // Middle segment
             }
-            segment.push_back(0x00);  // Reserved byte in SDW
+            segment.push_back(0x00);
 
-            // Add the data
             segment.insert(segment.end(),
                          data.begin() + dataOffset,
                          data.begin() + dataOffset + dataInSegment);
 
-            // If block is full, finish it
             if (!m_blockBuilder.hasRoom(segment.size())) {
                 std::vector<uint8_t> block = m_blockBuilder.finish();
                 if (!block.empty()) {
                     completeBlocks.push_back(block);
                 }
             }
-
-            // Add segment to current block
             m_blockBuilder.addData(segment);
 
             dataOffset += dataInSegment;
