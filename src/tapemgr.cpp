@@ -1778,7 +1778,6 @@ public:
         if (m_config.binary) {
             return rawData;
         } else {
-            // Convert to string for easier handling
             std::string text(rawData.begin(), rawData.end());
 
             // Right trim spaces, but ensure at least one space for empty
@@ -1789,35 +1788,17 @@ public:
                 text = " ";  // Single UTF-8 space (will become 0x40 in EBCDIC)
             }
 
-            // Convert trimmed text to EBCDIC
             return converter->utf8ToEbcdic(std::vector<uint8_t>(text.begin(), text.end()));
-        }
-    }
-};
-
-class SpannedRecordFormatter : public RecordFormatter {
-public:
-    SpannedRecordFormatter(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : RecordFormatter(config, verbosity) {}
-
-    std::vector<uint8_t> formatRecord(const std::vector<uint8_t>& rawData) override {
-        // Identical to VariableRecordFormatter - just handles EBCDIC conversion
-        if (m_config.binary) {
-            return rawData;
-        } else {
-            return converter->utf8ToEbcdic(rawData);
         }
     }
 };
 
 static std::unique_ptr<RecordFormatter> createFormatter(const FileConfig& config,
                                                       VerbosityLevel verbosity) {
-    if (config.recfm.find('S') != std::string::npos) {
-        return std::make_unique<SpannedRecordFormatter>(config, verbosity);
+    if (config.recordFormat == 'F') {
+        return std::make_unique<FixedRecordFormatter>(config, verbosity);
     } else if (config.recordFormat == 'V') {
         return std::make_unique<VariableRecordFormatter>(config, verbosity);
-    } else if (config.recordFormat == 'F') {
-        return std::make_unique<FixedRecordFormatter>(config, verbosity);
     }
     throw std::runtime_error("Unsupported record format: " + config.recfm);
 }
