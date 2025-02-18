@@ -1020,10 +1020,50 @@ bool AwsTapeDumper::scanTape() {
     AwsTapeBlockHeader header;
     std::vector<uint8_t> buffer;
     uint8_t prevFlags = 0;
+    bool afterHdr2 = false;
 
     while (readBlock(header, buffer)) {
         if (m_verbosity >= VerbosityLevel::Detailed) {
-            printDetail(header, m_verbosity);  // We'll keep using the existing helper for now
+            printDetail(header, m_verbosity);
+        }
+
+        // Process tape marks specifically
+        if (header.flags1 & 0x40) {
+            if (m_verbosity >= VerbosityLevel::Detailed) {
+                std::cout << "TAPE MARK at position " << (m_tapeFile.tellg() - std::streampos(sizeof(header))) << std::endl;
+            }
+
+            if (prevFlags == header.flags1) {
+                // Two consecutive tape marks indicate end of tape
+                if (m_verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "End of tape" << std::endl;
+                }
+                break;
+            }
+
+            // Single tape mark might indicate start of data blocks
+            if (afterHdr2) {
+                // This tape mark follows HDR2 - the next block will be data
+                m_currentFile.dataStart = m_tapeFile.tellg();
+                m_inDataBlocks = true;
+                afterHdr2 = false;  // Reset for next file
+
+                if (m_verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "Data blocks start at " << m_currentFile.dataStart << std::endl;
+                }
+            } else if (m_inDataBlocks) {
+                // This tape mark follows data blocks - end of data
+                m_inDataBlocks = false;
+                m_currentFile.dataEnd = m_tapeFile.tellg() -
+                    std::streampos(sizeof(header));
+
+                if (m_verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "Data blocks end at " << m_currentFile.dataEnd << std::endl;
+                }
+            }
+
+            prevFlags = header.flags1;
+            continue;
         }
 
         if (header.curblkl > 0) {
@@ -1045,12 +1085,18 @@ bool AwsTapeDumper::scanTape() {
                 if (validateHDR1Label(*hdr1)) {
                     processHDR1Label(*hdr1);
                 }
+
+                // Reset data block tracking for this file
+                m_inDataBlocks = false;
+                m_currentBlockCount = 0;
+                afterHdr2 = false;
             }
             else if (labelIdentifier == "HDR2") {
                 const HDR2Label* hdr2 = reinterpret_cast<const HDR2Label*>(buffer.data());
                 if (validateHDR2Label(*hdr2)) {
                     processHDR2Label(*hdr2);
                 }
+                afterHdr2 = true;
             }
             else if (labelIdentifier == "EOF1") {
                 const EOF1Label* eof1 = reinterpret_cast<const EOF1Label*>(buffer.data());
@@ -1060,37 +1106,26 @@ bool AwsTapeDumper::scanTape() {
                 const EOF2Label* eof2 = reinterpret_cast<const EOF2Label*>(buffer.data());
                 processEOF2Label(*eof2);
 
-                // End of the current file
-                m_currentFile.dataEnd = m_tapeFile.tellg() -
-                    (std::streampos)(sizeof(AwsTapeBlockHeader) + header.curblkl);
+                // End of the current file - make sure all properties are set
+                if (m_currentFile.dataEnd == 0) {
+                    m_currentFile.dataEnd = m_tapeFile.tellg() -
+                        (std::streampos)(sizeof(AwsTapeBlockHeader) + header.curblkl);
+                }
+
+                // Save this file
                 m_files.push_back(m_currentFile);
+
+                if (m_verbosity >= VerbosityLevel::Detailed) {
+                    std::cout << "File " << m_currentFile.datasetName
+                             << " at " << m_currentFile.fileStart
+                             << ", data from " << m_currentFile.dataStart
+                             << " to " << m_currentFile.dataEnd
+                             << " (" << m_currentFile.blockCount << " blocks)" << std::endl;
+                }
             }
             else if (m_inDataBlocks) {
                 // Count data blocks between HDR and EOF labels
                 m_currentBlockCount++;
-            }
-        }
-
-        // Check for tape marks
-        if (header.flags1 & 0x40) {
-            if (m_verbosity >= VerbosityLevel::Detailed) {
-                std::cout << "TAPE MARK" << std::endl;
-            }
-
-            if (prevFlags == header.flags1) {
-                // Two consecutive tape marks indicate end of tape
-                if (m_verbosity >= VerbosityLevel::Detailed) {
-                    std::cout << "End of tape" << std::endl;
-                }
-                break;
-            }
-
-            // Single tape mark might indicate start of data blocks
-            if (!m_inDataBlocks) {
-                m_currentFile.dataStart = m_tapeFile.tellg();
-                m_inDataBlocks = true;
-            } else {
-                m_inDataBlocks = false;
             }
         }
 
