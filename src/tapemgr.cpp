@@ -744,7 +744,9 @@ private:
 
 class AwsTapeDumper {
 public:
-    AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbosity = VerbosityLevel::Normal);
+    AwsTapeDumper(const std::string& inputFile,
+                 VerbosityLevel verbosity = VerbosityLevel::Normal,
+                 const std::string& outputDir = "");
     ~AwsTapeDumper();
 
     // Primary operations
@@ -855,7 +857,6 @@ public:
     }
 
 protected:
-    // Helper for extracting a single file
     void extractFile(const json& fileConfig) {
         if (m_verbosity >= VerbosityLevel::Normal) {
             std::cout << "Extracting dataset: " << fileConfig["dataset_name"] << std::endl;
@@ -871,7 +872,7 @@ protected:
             "record_format",
             "record_length",
             "block_size",
-            "file_position"  // I suspect this might be our missing field
+            "file_position"
         };
 
         for (const auto& field : requiredFields) {
@@ -880,13 +881,46 @@ protected:
             }
         }
 
+        // Get the adjusted output path using the output directory
+        std::string outputPath = getOutputPath(fileConfig["local_file"]);
+
+        if (m_verbosity >= VerbosityLevel::Detailed) {
+            std::cout << "  Output will be written to: " << outputPath << std::endl;
+        }
+
+        // Create a modified config with the adjusted output path
+        json modifiedConfig = fileConfig;
+        modifiedConfig["local_file"] = outputPath;
+
         // Convert position from JSON integer to streampos
         auto fileStart = static_cast<std::streampos>(fileConfig["file_position"].get<int64_t>());
         m_tapeFile.clear();
         m_tapeFile.seekg(fileStart);
 
-        ExtractionPipeline pipeline(m_tapeFile, fileConfig, m_verbosity);
+        // Create parent directories if they don't exist
+        std::filesystem::path outputFilePath(outputPath);
+        std::filesystem::create_directories(outputFilePath.parent_path());
+
+        ExtractionPipeline pipeline(m_tapeFile, modifiedConfig, m_verbosity);
         pipeline.extract();
+    }
+
+    std::string getOutputPath(const std::string& configFilePath) {
+        if (m_outputDir.empty()) {
+            return configFilePath;
+        }
+
+        // Get just the filename part, not the full path
+        std::filesystem::path path(configFilePath);
+        std::string filename = path.filename().string();
+
+        // Combine the output directory with the filename
+        std::filesystem::path outputPath = std::filesystem::path(m_outputDir) / filename;
+
+        // Create the output directory if it doesn't exist
+        std::filesystem::create_directories(std::filesystem::path(m_outputDir));
+
+        return outputPath.string();
     }
 
 private:
@@ -907,6 +941,7 @@ private:
     std::ifstream m_tapeFile;
     VerbosityLevel m_verbosity;
     std::vector<TapeFileInfo> m_files;
+    std::string m_outputDir;
 
     // Tape state tracking
     std::string m_currentVolser;
@@ -924,11 +959,14 @@ private:
     std::string m_ownerCode;
 };
 
-AwsTapeDumper::AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbosity)
+AwsTapeDumper::AwsTapeDumper(const std::string& inputFile,
+                           VerbosityLevel verbosity,
+                           const std::string& outputDir)
     : m_inputFile(inputFile)
     , m_verbosity(verbosity)
     , m_currentBlockCount(0)
-    , m_inDataBlocks(false) {
+    , m_inDataBlocks(false)
+    , m_outputDir(outputDir) {
 
     m_tapeFile.open(inputFile, std::ios::binary);
     if (!m_tapeFile) {
@@ -938,7 +976,7 @@ AwsTapeDumper::AwsTapeDumper(const std::string& inputFile, VerbosityLevel verbos
     if (m_verbosity >= VerbosityLevel::Normal) {
         std::cout << "Processing AWSTAPE file: " << inputFile << std::endl;
     }
-    labelConverter = getConverter(EbcdicCodePage::CP037); // Always use CP037 for labels
+    labelConverter = getConverter(EbcdicCodePage::CP037);
 }
 
 AwsTapeDumper::~AwsTapeDumper() {
@@ -2710,8 +2748,8 @@ int main(int argc, char* argv[]) {
                     throw std::runtime_error("Error loading configuration: " + error);
                 }
 
-                // Validate input tape volser matches config if specified
-                AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity);
+                // Pass the output directory to the constructor
+                AwsTapeDumper tapeDumper(options.inputFiles[0], options.verbosity, options.outputDir);
                 if (!tapeDumper.scanTape()) {
                     throw std::runtime_error("No valid files found on tape");
                 }
@@ -2730,7 +2768,9 @@ int main(int argc, char* argv[]) {
             case OperationMode::Scan:
             case OperationMode::Init: {
                 for (const auto& inputFile : options.inputFiles) {
-                    AwsTapeDumper tapeDumper(inputFile, options.verbosity);
+                    // Use the output directory for init mode as well
+                    AwsTapeDumper tapeDumper(inputFile, options.verbosity,
+                                           options.mode == OperationMode::Init ? options.outputDir : "");
 
                     if (!tapeDumper.scanTape()) {
                         std::cerr << "Error: No valid files found on tape: " << inputFile << std::endl;
