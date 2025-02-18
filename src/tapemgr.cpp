@@ -1369,6 +1369,12 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                         return false;
                     }
                     std::string date = file[field];
+
+                    // Special case: all zeros means never expires
+                    if (date == "00000" || date == " 00000" || date == "000000") {
+                        return true;
+                    }
+
                     if (date.length() != 6) {
                         error = std::string("Invalid ") + field + " length. Must be 6 digits (cyyddd)";
                         return false;
@@ -2289,6 +2295,9 @@ private:
     }
 
     std::string formatExpirationDate(int daysToKeep) {
+        if (daysToKeep < 0) {  // Special value to indicate never expires
+            return " 00000";    // Space for century + all zeros
+        }
         auto now = std::chrono::system_clock::now();
         auto expiration = now + std::chrono::hours(24 * daysToKeep);
         auto in_time_t = std::chrono::system_clock::to_time_t(expiration);
