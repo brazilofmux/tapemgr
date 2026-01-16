@@ -98,6 +98,8 @@ void showUsage(const char* progName) {
 struct FileConfig {
     std::string inputFile;
     std::string datasetName;
+    std::string creationDate;
+    std::string expirationDate;
     uint16_t lrecl;
     uint16_t blksize;
     std::string recfm;      // F, FB, V, VB, etc.
@@ -1779,15 +1781,19 @@ public:
         }
 
         uint16_t recordLength = (rdw[0] << 8) | rdw[1];
-        if (recordLength < 5) {
-            throw std::runtime_error("Binary VB record length must be at least 5 bytes (got " +
+        if (recordLength < 4) {
+            throw std::runtime_error("Binary VB record length must be at least 4 bytes (got " +
                                    std::to_string(recordLength) + ")");
         }
 
         // Return just the data portion
-        record.resize(recordLength - 4);
-        if (!m_inFile.read(reinterpret_cast<char*>(record.data()), recordLength - 4)) {
-            throw std::runtime_error("Unexpected end of file while reading VB record");
+        if (recordLength == 4) {
+            record.clear();
+        } else {
+            record.resize(recordLength - 4);
+            if (!m_inFile.read(reinterpret_cast<char*>(record.data()), recordLength - 4)) {
+                throw std::runtime_error("Unexpected end of file while reading VB record");
+            }
         }
 
         return true;
@@ -2152,12 +2158,13 @@ bool validateFixedBinaryFile(const std::string& filename, uint16_t lrecl) {
 }
 
 bool validateVariableBinaryFile(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file) {
         throw std::runtime_error("Unable to open binary file: " + filename);
     }
 
     size_t fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
     size_t offset = 0;
 
     while (offset < fileSize) {
@@ -2245,10 +2252,10 @@ public:
 
         // Store creation/expiration dates for label creation
         if (fileConfig.contains("creation_date")) {
-            m_creationDate = fileConfig["creation_date"].get<std::string>();
+            config.creationDate = fileConfig["creation_date"].get<std::string>();
         }
         if (fileConfig.contains("expiration_date")) {
-            m_expirationDate = fileConfig["expiration_date"].get<std::string>();
+            config.expirationDate = fileConfig["expiration_date"].get<std::string>();
         }
 
         // Parse codepage
@@ -2309,8 +2316,6 @@ private:
     int m_blockCount;
     std::string m_ownerCode;
     std::string m_jobId;
-    std::string m_creationDate;
-    std::string m_expirationDate;
 
     // Add validation method
     void validateFileConfig(const FileConfig& config) {
@@ -2343,6 +2348,13 @@ private:
         auto in_time_t = std::chrono::system_clock::to_time_t(now);
         std::tm* tm = std::localtime(&in_time_t);
 
+        auto normalizeLabelDate = [](const std::string& date) {
+            if (date.size() == 5) {
+                return " " + date;
+            }
+            return date;
+        };
+
         std::string label = "HDR1";
         label += padRight(config.datasetName, 17);  // Data Set Identifier
         label += padRight(m_volser, 6);             // Data Set Serial Number
@@ -2350,8 +2362,12 @@ private:
         label += padLeft(std::to_string(fileNumber), 4);  // Data Set Sequence Number
         label += "0001";                            // Generation Number
         label += "00";                              // Version Number
-        label += formatDate(tm);                    // Creation Date
-        label += formatExpirationDate(30);          // Default expriation to 30 days from now
+        label += config.creationDate.empty()
+            ? formatDate(tm)
+            : normalizeLabelDate(config.creationDate);
+        label += config.expirationDate.empty()
+            ? formatExpirationDate(30)
+            : normalizeLabelDate(config.expirationDate);
         label += "0";                               // Data Set Security
         label += "000000";                          // Block Count
         label += "IBM OS/VS 370";                   // System Code

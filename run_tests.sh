@@ -19,7 +19,7 @@ run_test() {
 
     echo "Running test: $test_name"
 
-    sh "$test_script"
+    bash "$test_script"
     status=$?
 
     if [ $status -eq 0 ]; then
