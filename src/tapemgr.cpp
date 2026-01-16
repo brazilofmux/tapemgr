@@ -2349,10 +2349,36 @@ private:
         std::tm* tm = std::localtime(&in_time_t);
 
         auto normalizeLabelDate = [](const std::string& date) {
+            // IBM standard label date format: cyyddd (6 chars)
+            // c = century (' ' for 19xx, '0' for 20xx, '1' for 21xx)
+            // yy = year within century, ddd = day of year (001-366)
             if (date.size() == 5) {
+                // Validate yyddd format (all digits)
+                for (char c : date) {
+                    if (!std::isdigit(static_cast<unsigned char>(c))) {
+                        throw std::runtime_error("Invalid label date format: " + date +
+                            " (expected yyddd with all digits)");
+                    }
+                }
                 return " " + date;
             }
-            return date;
+            if (date.size() == 6) {
+                // First char must be space or digit (century indicator)
+                if (date[0] != ' ' && !std::isdigit(static_cast<unsigned char>(date[0]))) {
+                    throw std::runtime_error("Invalid label date format: " + date +
+                        " (first character must be space or digit)");
+                }
+                // Remaining 5 chars must be digits (yyddd)
+                for (size_t i = 1; i < 6; ++i) {
+                    if (!std::isdigit(static_cast<unsigned char>(date[i]))) {
+                        throw std::runtime_error("Invalid label date format: " + date +
+                            " (expected cyyddd with digits after century)");
+                    }
+                }
+                return date;
+            }
+            throw std::runtime_error("Invalid label date format: " + date +
+                " (expected 5 or 6 characters, got " + std::to_string(date.size()) + ")");
         };
 
         std::string label = "HDR1";
