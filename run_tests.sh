@@ -12,6 +12,15 @@ TEST_EXPECTED="$TEST_ROOT/expected"
 # Create test directory structure
 mkdir -p "$TEST_DATA" "$TEST_CONFIG" "$TEST_OUTPUT" "$TEST_EXPECTED"
 
+# Many tape-format tests (002–008, 028, etc.) rely on python3 to generate
+# edge-case data and JSON configs. Fail early with a clear message if it is missing.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: python3 is required by several test cases (002–008, 028, ...)"
+    echo "       but was not found in PATH."
+    echo "Install python3 and re-run ./run_tests.sh"
+    exit 1
+fi
+
 # Function to run a single test case
 run_test() {
     test_name=$1
@@ -69,3 +78,27 @@ run_all_tests() {
 # Main execution
 cleanup
 run_all_tests
+test_status=$?
+
+# Cross-stack report parity (C++ vs COBOL) when real reports from ./batch.sh exist.
+# This closes the documented gap where the test runner could pass while
+# compare_reports.sh (the actual financial report equivalence check) failed.
+parity_status=0
+if [ -f "reports_cpp/journal-svd.prn" ] && [ -f "reports_cobol/journal-svd.prn" ]; then
+    echo
+    echo "Running cross-stack report parity check (C++ vs COBOL)..."
+    if ! ./tests/compare_reports.sh; then
+        echo "❌ Report parity failures — see tests/output/diffs/"
+        parity_status=1
+    else
+        echo "✅ All compared reports match between C++ and COBOL stacks"
+    fi
+else
+    echo
+    echo "Note: skipping report parity (run ./batch.sh first to generate reports_*/)"
+fi
+
+if [ $test_status -ne 0 ] || [ $parity_status -ne 0 ]; then
+    exit 1
+fi
+exit 0
