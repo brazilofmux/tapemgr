@@ -4,13 +4,11 @@
 # Setup test environment
 SCRIPT_DIR=$(dirname "$0")
 TEST_ROOT="$SCRIPT_DIR/tests"
-TEST_DATA="$TEST_ROOT/data"
-TEST_CONFIG="$TEST_ROOT/config"
 TEST_OUTPUT="$TEST_ROOT/output"
-TEST_EXPECTED="$TEST_ROOT/expected"
 
-# Create test directory structure
-mkdir -p "$TEST_DATA" "$TEST_CONFIG" "$TEST_OUTPUT" "$TEST_EXPECTED"
+# tests/data, tests/config, and tests/expected are committed to the repo;
+# only the (gitignored) output dir needs creating at runtime.
+mkdir -p "$TEST_OUTPUT"
 
 # Many tape-format tests (002–008, 028, etc.) rely on python3 to generate
 # edge-case data and JSON configs. Fail early with a clear message if it is missing.
