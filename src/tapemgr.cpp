@@ -851,8 +851,13 @@ public:
                                       return f["dataset_name"] == dsn;
                                   });
             if (it != createConfig["files"].end()) {
-                // Copy over the output file path and any other needed fields
+                // Copy over the output file path and any other needed fields.
+                // "binary" and "codepage" decide how the records are written
+                // out; without them a binary V dataset came back EBCDIC-
+                // translated whatever the extract config said.
                 file["local_file"] = (*it)["local_file"];
+                if (it->contains("binary")) file["binary"] = (*it)["binary"];
+                if (it->contains("codepage")) file["codepage"] = (*it)["codepage"];
             }
         }
         return merged;
