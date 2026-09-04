@@ -15,7 +15,9 @@ enum class EbcdicCodePage {
     CP037,
     CP273,
     CP277,
-    CP285
+    CP285,
+    CP500,
+    CP1047
     // Add others as needed
 };
 
@@ -62,6 +64,7 @@ private:
     const unsigned char* tr_itt_;
     const unsigned short* tr_sot_;
     const unsigned short* tr_sbt_;
+    unsigned short acceptingStart_;
     const uint8_t* toUtf8Lengths_;
     const uint8_t (*toUtf8Bytes_)[4];
 };
@@ -85,6 +88,7 @@ private:
     const unsigned char* tr_itt_;
     const unsigned short* tr_sot_;
     const unsigned short* tr_sbt_;
+    unsigned short acceptingStart_;
     const uint8_t* toUtf8Lengths_;
     const uint8_t (*toUtf8Bytes_)[4];
     
@@ -119,6 +123,7 @@ public:
         const unsigned char* tr_itt;
         const unsigned short* tr_sot;
         const unsigned short* tr_sbt;
+        unsigned short acceptingStart;   // first accepting state of the DFA
         const uint8_t* toUtf8Lengths;
         const uint8_t (*toUtf8Bytes)[4];
     };

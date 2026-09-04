@@ -5,6 +5,8 @@
 #include "cp273_tables.h"
 #include "cp277_tables.h"
 #include "cp285_tables.h"
+#include "cp500_tables.h"
+#include "cp1047_tables.h"
 
 // UTF-8 sequence length definitions
 #define UTF8_SIZE1     1
@@ -63,6 +65,7 @@ EbcdicTableRegistry::EbcdicTableRegistry() {
     cp037tables.tr_itt = tr_cp037_itt;
     cp037tables.tr_sot = tr_cp037_sot;
     cp037tables.tr_sbt = tr_cp037_sbt;
+    cp037tables.acceptingStart = TR_CP037_ACCEPTING_STATES_START;
     cp037tables.toUtf8Lengths = cp037_to_utf8_lengths;
     cp037tables.toUtf8Bytes = cp037_to_utf8_bytes;
     tables_[EbcdicCodePage::CP037] = cp037tables;
@@ -73,6 +76,7 @@ EbcdicTableRegistry::EbcdicTableRegistry() {
     cp273tables.tr_itt = tr_cp273_itt;
     cp273tables.tr_sot = tr_cp273_sot;
     cp273tables.tr_sbt = tr_cp273_sbt;
+    cp273tables.acceptingStart = TR_CP273_ACCEPTING_STATES_START;
     cp273tables.toUtf8Lengths = cp273_to_utf8_lengths;
     cp273tables.toUtf8Bytes = cp273_to_utf8_bytes;
     tables_[EbcdicCodePage::CP273] = cp273tables;
@@ -83,6 +87,7 @@ EbcdicTableRegistry::EbcdicTableRegistry() {
     cp277tables.tr_itt = tr_cp277_itt;
     cp277tables.tr_sot = tr_cp277_sot;
     cp277tables.tr_sbt = tr_cp277_sbt;
+    cp277tables.acceptingStart = TR_CP277_ACCEPTING_STATES_START;
     cp277tables.toUtf8Lengths = cp277_to_utf8_lengths;
     cp277tables.toUtf8Bytes = cp277_to_utf8_bytes;
     tables_[EbcdicCodePage::CP277] = cp277tables;
@@ -93,9 +98,32 @@ EbcdicTableRegistry::EbcdicTableRegistry() {
     cp285tables.tr_itt = tr_cp285_itt;
     cp285tables.tr_sot = tr_cp285_sot;
     cp285tables.tr_sbt = tr_cp285_sbt;
+    cp285tables.acceptingStart = TR_CP285_ACCEPTING_STATES_START;
     cp285tables.toUtf8Lengths = cp285_to_utf8_lengths;
     cp285tables.toUtf8Bytes = cp285_to_utf8_bytes;
     tables_[EbcdicCodePage::CP285] = cp285tables;
+
+    // Initialize tables for CP500
+    ConversionTables cp500tables;
+    cp500tables.utf8_FirstByte = utf8_FirstByte;
+    cp500tables.tr_itt = tr_cp500_itt;
+    cp500tables.tr_sot = tr_cp500_sot;
+    cp500tables.tr_sbt = tr_cp500_sbt;
+    cp500tables.acceptingStart = TR_CP500_ACCEPTING_STATES_START;
+    cp500tables.toUtf8Lengths = cp500_to_utf8_lengths;
+    cp500tables.toUtf8Bytes = cp500_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP500] = cp500tables;
+
+    // Initialize tables for CP1047
+    ConversionTables cp1047tables;
+    cp1047tables.utf8_FirstByte = utf8_FirstByte;
+    cp1047tables.tr_itt = tr_cp1047_itt;
+    cp1047tables.tr_sot = tr_cp1047_sot;
+    cp1047tables.tr_sbt = tr_cp1047_sbt;
+    cp1047tables.acceptingStart = TR_CP1047_ACCEPTING_STATES_START;
+    cp1047tables.toUtf8Lengths = cp1047_to_utf8_lengths;
+    cp1047tables.toUtf8Bytes = cp1047_to_utf8_bytes;
+    tables_[EbcdicCodePage::CP1047] = cp1047tables;
 }
 
 const EbcdicTableRegistry::ConversionTables& 
@@ -142,6 +170,7 @@ EbcdicConverter::EbcdicConverter(EbcdicCodePage codepage) {
     tr_itt_ = tables.tr_itt;
     tr_sot_ = tables.tr_sot;
     tr_sbt_ = tables.tr_sbt;
+    acceptingStart_ = tables.acceptingStart;
     toUtf8Lengths_ = tables.toUtf8Lengths;
     toUtf8Bytes_ = tables.toUtf8Bytes;
 }
@@ -189,9 +218,9 @@ std::vector<uint8_t> EbcdicConverter::utf8ToEbcdic(const std::vector<uint8_t>& i
                     iOffset = static_cast<unsigned short>(iOffset + y + 1);
                 }
             }
-        } while (iState < 3);  // Until accepting state
+        } while (iState < acceptingStart_);  // Until accepting state
 
-        ebcdic.push_back(static_cast<uint8_t>(iState - 3));
+        ebcdic.push_back(static_cast<uint8_t>(iState - acceptingStart_));
         pString = pString + t;
     }
 
@@ -236,6 +265,7 @@ StreamingEbcdicConverter::StreamingEbcdicConverter(
     tr_itt_ = tables.tr_itt;
     tr_sot_ = tables.tr_sot;
     tr_sbt_ = tables.tr_sbt;
+    acceptingStart_ = tables.acceptingStart;
     toUtf8Lengths_ = tables.toUtf8Lengths;
     toUtf8Bytes_ = tables.toUtf8Bytes;
 }
@@ -336,9 +366,9 @@ void StreamingEbcdicConverter::processBuffer(
                     iOffset = static_cast<unsigned short>(iOffset + y + 1);
                 }
             }
-        } while (iState < 3);
+        } while (iState < acceptingStart_);
 
-        output.push_back(static_cast<uint8_t>(iState - 3));
+        output.push_back(static_cast<uint8_t>(iState - acceptingStart_));
         pos += t;
     }
 

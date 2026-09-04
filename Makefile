@@ -13,7 +13,9 @@ SRCS = src/tapemgr.cpp \
        src/cp037_tables.cpp \
        src/cp273_tables.cpp \
        src/cp277_tables.cpp \
-       src/cp285_tables.cpp
+       src/cp285_tables.cpp \
+       src/cp500_tables.cpp \
+       src/cp1047_tables.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: tapemgr
@@ -25,11 +27,13 @@ src/%.o: src/%.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c -o $@ $<
 
 src/tapemgr.o: src/ebcdic_converter.h third_party/nlohmann/json.hpp
-src/ebcdic_converter.o: src/ebcdic_converter.h src/cp037_tables.h src/cp273_tables.h src/cp277_tables.h src/cp285_tables.h
+src/ebcdic_converter.o: src/ebcdic_converter.h src/cp037_tables.h src/cp273_tables.h src/cp277_tables.h src/cp285_tables.h src/cp500_tables.h src/cp1047_tables.h
 src/cp037_tables.o: src/cp037_tables.h
 src/cp273_tables.o: src/cp273_tables.h
 src/cp277_tables.o: src/cp277_tables.h
 src/cp285_tables.o: src/cp285_tables.h
+src/cp500_tables.o: src/cp500_tables.h
+src/cp1047_tables.o: src/cp1047_tables.h
 
 test: tapemgr
 	./run_tests.sh

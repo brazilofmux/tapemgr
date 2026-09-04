@@ -19,7 +19,7 @@
 #include <nlohmann/json.hpp>
 #include "ebcdic_converter.h"
 
-const char* VERSION = "1.01";
+const char* VERSION = "1.02";
 
 // Defaults for the DASD side of RESTORE.JCL. Override per tape with the
 // top-level "default_volser" / "default_unit" config keys, or per file with
@@ -515,6 +515,8 @@ public:
             if (cp == "CP273") codepage = EbcdicCodePage::CP273;
             else if (cp == "CP277") codepage = EbcdicCodePage::CP277;
             else if (cp == "CP285") codepage = EbcdicCodePage::CP285;
+            else if (cp == "CP500") codepage = EbcdicCodePage::CP500;
+            else if (cp == "CP1047") codepage = EbcdicCodePage::CP1047;
         }
 
         return std::make_unique<TextRecordTransformer>(codepage);
@@ -1406,7 +1408,9 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
             {"CP037", EbcdicCodePage::CP037},
             {"CP273", EbcdicCodePage::CP273},
             {"CP277", EbcdicCodePage::CP277},
-            {"CP285", EbcdicCodePage::CP285}
+            {"CP285", EbcdicCodePage::CP285},
+            {"CP500", EbcdicCodePage::CP500},
+            {"CP1047", EbcdicCodePage::CP1047}
         };
 
         // Validate files array
@@ -1543,7 +1547,7 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                 }
                 std::string cp = file["codepage"].get<std::string>();
                 if (validCodePages.find(cp) == validCodePages.end()) {
-                    error = "Invalid codepage. Must be one of: CP037, CP273, CP277, CP285";
+                    error = "Invalid codepage. Must be one of: CP037, CP273, CP277, CP285, CP500, CP1047";
                     return false;
                 }
             }
@@ -2285,6 +2289,8 @@ public:
             if (cp == "CP273") config.codepage = EbcdicCodePage::CP273;
             else if (cp == "CP277") config.codepage = EbcdicCodePage::CP277;
             else if (cp == "CP285") config.codepage = EbcdicCodePage::CP285;
+            else if (cp == "CP500") config.codepage = EbcdicCodePage::CP500;
+            else if (cp == "CP1047") config.codepage = EbcdicCodePage::CP1047;
             else config.codepage = EbcdicCodePage::CP037; // Default
         }
 

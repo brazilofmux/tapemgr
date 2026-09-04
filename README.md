@@ -7,7 +7,7 @@ MVS wrote, and `tapemgr` reads them back exactly as it would on the guest.
 
 It handles standard-label (SL) tapes with `RECFM=F`, `FB`, `V`, `VB`, `VS`,
 and `VBS`, including spanned records that cross block boundaries, and converts
-text between UTF-8 and EBCDIC code pages 037, 273, 277, and 285.
+text between UTF-8 and EBCDIC code pages 037, 273, 277, 285, 500, and 1047.
 
 ## Build
 
@@ -77,8 +77,12 @@ How records land on disk depends on `binary`:
 | `true`   | F, FB | records concatenated, `record_length` bytes each |
 | `true`   | V, VB, VS, VBS | each record preceded by a 4-byte RDW (2-byte big-endian length including the RDW, then two zero bytes); spanned records are reassembled |
 
-Text mode accepts an optional `"codepage"` of `CP037` (default), `CP273`,
-`CP277`, or `CP285`.
+Text mode accepts an optional `"codepage"`: `CP037` (default, US and
+Canada), `CP273` (Germany and Austria), `CP277` (Denmark and Norway), `CP285`
+(United Kingdom), `CP500` (international Latin-1), or `CP1047` (z/OS Unix and
+the C compiler). Each table is generated from a 256-entry mapping file under
+`src/`, checked against ICU's tables, and verified exhaustively by
+`tests/codepage_check.cpp`.
 
 ## Sending a dataset to MVS
 
@@ -158,9 +162,24 @@ The test suite round-trips each record format through `create` and
 but extraction of a `VBS` tape written by MVS itself has not yet been
 exercised. Reports of either outcome are welcome.
 
-The EBCDIC tables under `src/` are generated from the mappings in
-[brazilofmux/utf](https://github.com/brazilofmux/utf); the `tr_utf8_*.txt`
-files are the inputs that produced them.
+## Adding a code page
+
+The EBCDIC tables under `src/` are generated, not hand-written. To add one:
+
+1. Write `src/tr_utf8_cpNNN.txt`, one line per EBCDIC byte in the form
+   `UUUU;ddd;NAME;` (Unicode code point in hex, EBCDIC byte in decimal,
+   character name). ICU's `.ucm` files are a good source; only the
+   round-trip (`|0`) entries belong in it, and there must be exactly 256.
+2. Build the `integers` DFA builder from
+   [brazilofmux/utf](https://github.com/brazilofmux/utf) (`gen/integers.cpp`
+   with `smutil.cpp` and `ConvertUTF.cpp`) and run
+   `tools/mktables.py --integers <path> NNN`.
+3. Add `CPNNN` to the enum in `src/ebcdic_converter.h`, a registry entry in
+   `src/ebcdic_converter.cpp`, the two `"CPNNN"` parse sites and the valid
+   list in `src/tapemgr.cpp`, and the new `.cpp` to the Makefile.
+
+`make test` then checks every byte and every code point of every page in
+both directions.
 
 ## License
 
