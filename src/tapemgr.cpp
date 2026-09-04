@@ -66,13 +66,6 @@ struct ProgramOptions {
     std::string outputDir;     // Optional directory for extracted files
 };
 
-const struct option COMMON_OPTIONS[] = {
-    {"verbose", no_argument, 0, 'v'},
-    {"help", no_argument, 0, 'h'},
-    {"config", required_argument, 0, 'c'},
-    {0, 0, 0, 0}
-};
-
 void showUsage(const char* progName) {
     std::cout << "tapemgr version " << VERSION << "\n"
               << "\nUsage: " << progName << " <command> [options] <files...>\n"
@@ -345,7 +338,7 @@ private:
 
 class VariableRecordProcessor : public RecordProcessor {
 public:
-    VariableRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
+    explicit VariableRecordProcessor(uint16_t /*maxRecordLength*/) {}
 
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> records;
@@ -379,14 +372,11 @@ public:
     std::vector<std::vector<uint8_t>> flush() override {
         return {};  // Variable records don't span blocks
     }
-
-private:
-    uint16_t m_maxRecordLength;
 };
 
 class SpannedRecordProcessor : public RecordProcessor {
 public:
-    SpannedRecordProcessor(uint16_t maxRecordLength) : m_maxRecordLength(maxRecordLength) {}
+    explicit SpannedRecordProcessor(uint16_t /*maxRecordLength*/) {}
 
     std::vector<std::vector<uint8_t>> processBlock(const std::vector<uint8_t>& blockData) override {
         std::vector<std::vector<uint8_t>> completeRecords;
@@ -441,7 +431,6 @@ public:
     }
 
 private:
-    uint16_t m_maxRecordLength;
     std::vector<uint8_t> m_currentRecord;
 };
 
@@ -501,15 +490,11 @@ private:
 // Binary record transformer (pass-through with optional RDW handling)
 class BinaryRecordTransformer : public RecordTransformer {
 public:
-    explicit BinaryRecordTransformer(bool stripDescriptors = false)
-        : m_stripDescriptors(stripDescriptors) {}
+    explicit BinaryRecordTransformer(bool /*stripDescriptors*/ = false) {}
 
     std::vector<uint8_t> transform(const std::vector<uint8_t>& record) override {
         return record;  // Just pass through - all descriptor handling done by processors
     }
-
-private:
-    bool m_stripDescriptors;
 };
 
 class RecordTransformerFactory {
@@ -978,9 +963,9 @@ AwsTapeDumper::AwsTapeDumper(const std::string& inputFile,
                            const std::string& outputDir)
     : m_inputFile(inputFile)
     , m_verbosity(verbosity)
+    , m_outputDir(outputDir)
     , m_currentBlockCount(0)
-    , m_inDataBlocks(false)
-    , m_outputDir(outputDir) {
+    , m_inDataBlocks(false) {
 
     m_tapeFile.open(inputFile, std::ios::binary);
     if (!m_tapeFile) {
@@ -1707,7 +1692,6 @@ std::string calculateSpace(const FileConfig& config) {
     // Convert to cylinders if it's more than one cylinder
     if (tracksNeeded > TRACKS_PER_CYLINDER) {
         int cylinders = (tracksNeeded + TRACKS_PER_CYLINDER - 1) / TRACKS_PER_CYLINDER;
-        int extraTracks = tracksNeeded % TRACKS_PER_CYLINDER;
         return "CYL,(" + std::to_string(cylinders) + "," + std::to_string(cylinders/2) + ")";
     } else {
         return "TRK,(" + std::to_string(tracksNeeded) + "," + std::to_string(tracksNeeded/2) + ")";
@@ -1949,8 +1933,8 @@ protected:
 
 class BlockBuilder {
 public:
-    BlockBuilder(uint16_t blockSize, bool usesBDW, VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : m_blockSize(blockSize), m_usesBDW(usesBDW), m_verbosity(verbosity) {
+    BlockBuilder(uint16_t blockSize, bool usesBDW, VerbosityLevel /*verbosity*/ = VerbosityLevel::Normal)
+        : m_blockSize(blockSize), m_usesBDW(usesBDW) {
         initializeNewBlock();
     }
 
@@ -2003,7 +1987,6 @@ private:
     size_t m_currentOffset;
     uint16_t m_blockSize;
     bool m_usesBDW;
-    VerbosityLevel m_verbosity;
 };
 
 class FixedBlockProcessor : public BlockProcessor {
@@ -2056,7 +2039,7 @@ private:
 class VariableBlockProcessor : public BlockProcessor {
 public:
     VariableBlockProcessor(const FileConfig& config, VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : m_config(config), m_blockBuilder(config.blksize, true, verbosity) {
+        : m_blockBuilder(config.blksize, true, verbosity) {
         m_verbosity = verbosity;
     }
 
@@ -2097,7 +2080,6 @@ public:
     }
 
 private:
-    const FileConfig& m_config;
     BlockBuilder m_blockBuilder;
 };
 
@@ -2246,10 +2228,9 @@ public:
                  const std::string ownerCode = "TAPEOWNER",
                  const std::string jobId = DEFAULT_JOB_ID,
                  VerbosityLevel verbosity = VerbosityLevel::Normal)
-        : m_volser(volser), m_outputFile(outputFile),
+        : m_verbosity(verbosity), m_volser(volser), m_outputFile(outputFile),
           m_prevBlockSize(0), m_blockCount(0),
-          m_ownerCode(ownerCode), m_jobId(jobId),
-          m_verbosity(verbosity) {
+          m_ownerCode(ownerCode), m_jobId(jobId) {
         if (m_verbosity >= VerbosityLevel::Normal) {
             std::cout << "Initializing tape maker for volume " << volser << std::endl;
         }

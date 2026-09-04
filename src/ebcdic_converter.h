@@ -58,7 +58,6 @@ public:
     char ebcdicToAscii(unsigned char eb) override;
 
 private:
-    EbcdicCodePage codepage_;
     const unsigned char* utf8_FirstByte_;
     const unsigned char* tr_itt_;
     const unsigned short* tr_sot_;
@@ -78,7 +77,6 @@ public:
     char ebcdicToAscii(unsigned char eb) override;
 
 private:
-    EbcdicCodePage codepage_;
     size_t bufferSize_;
     std::vector<uint8_t> buffer_;
     

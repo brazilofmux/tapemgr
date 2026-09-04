@@ -136,8 +136,7 @@ std::string IEbcdicConverter::ebcdicToUtf8String(
 }
 
 // Memory-based converter implementation
-EbcdicConverter::EbcdicConverter(EbcdicCodePage codepage) 
-    : codepage_(codepage) {
+EbcdicConverter::EbcdicConverter(EbcdicCodePage codepage) {
     auto& tables = EbcdicTableRegistry::getInstance().getTables(codepage);
     utf8_FirstByte_ = tables.utf8_FirstByte;
     tr_itt_ = tables.tr_itt;
@@ -229,8 +228,7 @@ char EbcdicConverter::ebcdicToAscii(unsigned char eb) {
 StreamingEbcdicConverter::StreamingEbcdicConverter(
     EbcdicCodePage codepage, 
     size_t bufferSize)
-    : codepage_(codepage)
-    , bufferSize_(bufferSize)
+    : bufferSize_(bufferSize)
     , buffer_(bufferSize) {
     
     auto& tables = EbcdicTableRegistry::getInstance().getTables(codepage);
