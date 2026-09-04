@@ -19,7 +19,14 @@
 #include <nlohmann/json.hpp>
 #include "ebcdic_converter.h"
 
-const char* VERSION = "1.00";
+const char* VERSION = "1.01";
+
+// Defaults for the DASD side of RESTORE.JCL. Override per tape with the
+// top-level "default_volser" / "default_unit" config keys, or per file with
+// "target_volser" / "target_unit".
+const char* DEFAULT_DASD_VOLSER = "PUB001";
+const char* DEFAULT_DASD_UNIT = "3350";
+const char* DEFAULT_JOB_ID = "BRAZIL/TAPEMGR";
 
 using json = nlohmann::json;
 
@@ -107,8 +114,8 @@ struct FileConfig {
     char blockAttribute;    // B, S, R, or ' '
     bool binary;
     size_t recordCount;
-    std::string targetUnit = "3380";    // Default device type
-    std::string targetVolser = "";      // Empty means use default
+    std::string targetUnit = "";        // Empty means use the tape-level default_unit
+    std::string targetVolser = "";      // Empty means use the tape-level default_volser
     EbcdicCodePage codepage = EbcdicCodePage::CP037; // Default to CP037
 };
 
@@ -1384,6 +1391,29 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
             }
         }
 
+        // Optional DASD defaults used by RESTORE.JCL
+        auto validateVolser = [&error](const json& obj, const char* field) {
+            if (!obj.contains(field)) return true;
+            if (!obj[field].is_string() || obj[field].get<std::string>().empty() ||
+                obj[field].get<std::string>().length() > 6) {
+                error = std::string(field) + " must be 1-6 characters";
+                return false;
+            }
+            return true;
+        };
+        auto validateUnit = [&error](const json& obj, const char* field) {
+            if (!obj.contains(field)) return true;
+            if (!obj[field].is_string() || obj[field].get<std::string>().empty() ||
+                obj[field].get<std::string>().length() > 8) {
+                error = std::string(field) + " must be 1-8 characters";
+                return false;
+            }
+            return true;
+        };
+        if (!validateVolser(config, "default_volser") || !validateUnit(config, "default_unit")) {
+            return false;
+        }
+
         const std::set<std::string> validRecFM = {"F", "FB", "V", "VB", "VS", "VBS", "U"};
         const std::set<std::string> validBlockAttrs = {"B", "S", "R", " "};
         const std::set<std::string> validDatasetOrgs = {"PS"};  // Could expand later
@@ -1431,6 +1461,10 @@ bool AwsTapeDumper::validateConfig(const json& config, std::string& error) {
                     error = "Invalid block_attribute. Must be one of: B, S, R, or space";
                     return false;
                 }
+            }
+
+            if (!validateVolser(file, "target_volser") || !validateUnit(file, "target_unit")) {
+                return false;
             }
 
             // Validate dataset_org if present
@@ -1681,8 +1715,9 @@ std::string calculateSpace(const FileConfig& config) {
 }
 
 std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs,
-                                      const std::string& defaultVolser = "SVD002",
-                                      const std::string& defaultUnit = "3380") {
+                                      const std::string& tapeVolser,
+                                      const std::string& defaultVolser,
+                                      const std::string& defaultUnit) {
     std::stringstream jcl;
 
     // Job card
@@ -1706,7 +1741,7 @@ std::string generateMultiFileRestoreJCL(const std::vector<FileConfig>& configs,
         jcl << "//SYSPRINT DD  SYSOUT=A\n";
         jcl << "//SYSIN    DD  DUMMY\n";
         jcl << "//SYSUT1   DD  DSN=" << config.datasetName << ",UNIT=TAPE,\n";
-        jcl << "//             VOL=(PRIVATE,RETAIN,SER=240001),LABEL=(" << ((stepNumber-1)/2) << ",SL),\n";
+        jcl << "//             VOL=(PRIVATE,RETAIN,SER=" << tapeVolser << "),LABEL=(" << ((stepNumber-1)/2) << ",SL),\n";
         jcl << "//             DCB=(RECFM=" << config.recfm << ",LRECL=" << config.lrecl
             << ",BLKSIZE=" << config.blksize << "),\n";
         jcl << "//             DISP=OLD\n";
@@ -2209,7 +2244,7 @@ class AwsTapeMaker {
 public:
     AwsTapeMaker(const std::string& volser, const std::string& outputFile,
                  const std::string ownerCode = "TAPEOWNER",
-                 const std::string jobId = "MAJESTY/MAKETAPE",
+                 const std::string jobId = DEFAULT_JOB_ID,
                  VerbosityLevel verbosity = VerbosityLevel::Normal)
         : m_volser(volser), m_outputFile(outputFile),
           m_prevBlockSize(0), m_blockCount(0),
@@ -2272,6 +2307,10 @@ public:
             else config.codepage = EbcdicCodePage::CP037; // Default
         }
 
+        // Where RESTORE.JCL should put this dataset on DASD
+        config.targetVolser = fileConfig.value("target_volser", "");
+        config.targetUnit = fileConfig.value("target_unit", "");
+
         addFile(config);  // Call the FileConfig version
     }
 
@@ -2286,6 +2325,12 @@ public:
         m_files.push_back(config);
     }
 
+    // DASD volume and unit that RESTORE.JCL uses for files without their own
+    void setRestoreDefaults(const std::string& dasdVolser, const std::string& dasdUnit) {
+        m_dasdVolser = dasdVolser;
+        m_dasdUnit = dasdUnit;
+    }
+
     void writeTape() {
         std::cout << "Starting tape writing process..." << std::endl;
 
@@ -2296,7 +2341,8 @@ public:
             }
             writeEndOfTape();
 
-            std::string jcl = generateMultiFileRestoreJCL(m_files);
+            std::string jcl = generateMultiFileRestoreJCL(m_files, m_volser,
+                                                          m_dasdVolser, m_dasdUnit);
 
             // Write the JCL to a file
             std::ofstream outFile("RESTORE.JCL");
@@ -2321,6 +2367,8 @@ private:
     int m_blockCount;
     std::string m_ownerCode;
     std::string m_jobId;
+    std::string m_dasdVolser = DEFAULT_DASD_VOLSER;
+    std::string m_dasdUnit = DEFAULT_DASD_UNIT;
 
     // Add validation method
     void validateFileConfig(const FileConfig& config) {
@@ -2810,7 +2858,10 @@ int main(int argc, char* argv[]) {
 
                 AwsTapeMaker tapeMaker(options.volser, options.outputFile,
                                       options.ownerCode.empty() ? "TAPEOWNER" : options.ownerCode,
-                                      "TAPEMGR/CREATE", options.verbosity);
+                                      DEFAULT_JOB_ID, options.verbosity);
+                tapeMaker.setRestoreDefaults(
+                    config.value("default_volser", std::string(DEFAULT_DASD_VOLSER)),
+                    config.value("default_unit", std::string(DEFAULT_DASD_UNIT)));
 
                 for (const auto& fileConfig : config["files"]) {
                     tapeMaker.addFile(fileConfig);  // Now using JSON directly

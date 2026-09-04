@@ -111,7 +111,11 @@ so MVS can read it with `LABEL=(n,SL)` and no DCB overrides.
 
 `create` also writes `RESTORE.JCL` in the current directory: one IEFBR14
 delete step and one IEBGENER copy step per file, restoring each dataset from
-the tape to DASD. Edit the volume serial and unit before submitting it.
+the tape to DASD. The tape volser comes from `--volser`. The DASD volume and
+unit default to `PUB001` and `3350`; set `default_volser` and `default_unit`
+at the top level of the config to change them for the whole tape, or
+`target_volser` and `target_unit` on a file entry to place that one dataset
+elsewhere. The HDR2 job/step field on the tape reads `BRAZIL/TAPEMGR`.
 
 ## Scan
 

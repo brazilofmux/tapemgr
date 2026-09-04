@@ -179,6 +179,44 @@ expect_failure "extract on garbage file" "No valid files\|malformed\|scan\|VOL1"
 rm -f "$OUTPUT_DIR/garbage.aws" "$CONFIG_DIR/garbage_extract.json" "$OUTPUT_DIR/garb_out.txt"
 
 # --------------------------------------------------------------------
+# DASD default / target keys for RESTORE.JCL
+# --------------------------------------------------------------------
+echo "--- RESTORE.JCL DASD keys ---"
+printf 'X\n' > "$DATA_DIR/dasd.txt"
+cat > "$CONFIG_DIR/bad_default_volser.json" <<EOF
+{
+  "volume_serial": "TAP001",
+  "default_volser": "TOOLONG1",
+  "files": [{
+    "dataset_name": "TEST.DASD",
+    "local_file": "$DATA_DIR/dasd.txt",
+    "record_format": "F",
+    "record_length": 80,
+    "block_size": 80
+  }]
+}
+EOF
+expect_failure "default_volser longer than 6" "default_volser must be 1-6" \
+    "$TAPEMGR" create --volser=TAP001 -o "$OUTPUT_DIR/dasd.aws" -c "$CONFIG_DIR/bad_default_volser.json"
+
+cat > "$CONFIG_DIR/bad_target_unit.json" <<EOF
+{
+  "volume_serial": "TAP001",
+  "files": [{
+    "dataset_name": "TEST.DASD",
+    "local_file": "$DATA_DIR/dasd.txt",
+    "record_format": "F",
+    "record_length": 80,
+    "block_size": 80,
+    "target_unit": 3380
+  }]
+}
+EOF
+expect_failure "target_unit not a string" "target_unit must be 1-8" \
+    "$TAPEMGR" create --volser=TAP001 -o "$OUTPUT_DIR/dasd.aws" -c "$CONFIG_DIR/bad_target_unit.json"
+rm -f "$OUTPUT_DIR/dasd.aws" "$DATA_DIR/dasd.txt"
+
+# --------------------------------------------------------------------
 # Final summary
 # --------------------------------------------------------------------
 echo
