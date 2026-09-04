@@ -1,0 +1,7 @@
+tapemgr
+*.o
+tests/output/
+tests/data/
+tests/config/
+*.aws
+RESTORE.JCL
